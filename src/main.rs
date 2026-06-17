@@ -1,17 +1,16 @@
-//! CLI + HuggingFace download wiring. Glue only — the interesting code is in
-//! `model.rs` (architecture) and `generate.rs` (decode loop).
-
 mod config;
 mod generate;
 mod model;
 mod prompt;
 mod sampler;
 
+use std::collections::BTreeSet;
 use std::io::Write;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType, api::sync::Api, api::sync::ApiRepo};
 use mlx_rs::module::ModuleParametersExt;
 use tokenizers::Tokenizer;
 
@@ -28,7 +27,10 @@ struct Cli {
     model: String,
 
     /// User message.
-    #[clap(long, default_value = "Explain rotary position embeddings in one sentence.")]
+    #[clap(
+        long,
+        default_value = "Explain rotary position embeddings in one sentence."
+    )]
     prompt: String,
 
     /// Optional system prompt.
@@ -62,10 +64,8 @@ fn main() -> Result<()> {
     eprintln!("[info] resolving model files for {} …", cli.model);
     let config_path = repo.get("config.json").context("fetch config.json")?;
     let tokenizer_path = repo.get("tokenizer.json").context("fetch tokenizer.json")?;
-    let weights_path = repo
-        .get("model.safetensors")
-        .context("fetch model.safetensors")?;
-    // generation_config.json is optional; fall back to known EOS ids.
+    let weight_paths = resolve_weights(&repo).context("resolve model weight files")?;
+
     let gen_cfg: GenerationConfig = match repo.get("generation_config.json") {
         Ok(p) => serde_json::from_reader(std::fs::File::open(p)?)?,
         Err(_) => GenerationConfig::default(),
@@ -81,9 +81,12 @@ fn main() -> Result<()> {
         args.dim, args.n_layers, args.n_heads, args.n_kv_heads, args.head_dim, args.vocab_size
     );
     let mut m = Model::new(&args)?;
-    eprintln!("[info] loading weights …");
-    m.load_safetensors(&weights_path)
-        .context("load_safetensors (struct field names must match HF tensor keys)")?;
+    eprintln!("[info] loading weights from {} shard(s) …", weight_paths.len());
+    for p in &weight_paths {
+        // Lenient: each call updates only the params present in that shard.
+        m.load_safetensors(p)
+            .context("load_safetensors (struct field names must match HF tensor keys)")?;
+    }
 
     if cli.quantize {
         eprintln!("[info] runtime-quantizing to 4-bit …");
@@ -100,13 +103,8 @@ fn main() -> Result<()> {
     print!("{}", cli.prompt);
     let _ = std::io::stdout().flush();
 
-    let mut tok = tokenizer.clone();
-    let _ = tok; // reserved for incremental detokenization tweaks
-
     let generated = generate::generate(&mut m, ids, cli.max_tokens, cli.temp, &eos, |_id| {})?;
 
-    // Decode the full generation in one shot (incremental streaming detok is a
-    // later refinement — see README).
     let text = tokenizer
         .decode(&generated, true)
         .map_err(|e| anyhow::anyhow!(e))?;
@@ -114,4 +112,31 @@ fn main() -> Result<()> {
     eprintln!("\n[info] generated {} tokens", generated.len());
 
     Ok(())
+}
+
+/// Resolve the model weight file(s) to local paths, downloading as needed.
+/// Handles both single-file repos (`model.safetensors`) and the sharded
+/// layout (`model.safetensors.index.json` -> N shards, e.g. MiniCPM5-1B's
+/// `model-00000-of-00001.safetensors`).
+fn resolve_weights(repo: &ApiRepo) -> Result<Vec<PathBuf>> {
+    if let Ok(index_path) = repo.get("model.safetensors.index.json") {
+        let v: serde_json::Value = serde_json::from_reader(std::fs::File::open(index_path)?)?;
+        let map = v
+            .get("weight_map")
+            .and_then(|m| m.as_object())
+            .context("index.json missing weight_map")?;
+        let shards: BTreeSet<String> = map
+            .values()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
+        let mut paths = Vec::with_capacity(shards.len());
+        for shard in shards {
+            paths.push(repo.get(&shard).with_context(|| format!("fetch {shard}"))?);
+        }
+        return Ok(paths);
+    }
+    Ok(vec![
+        repo.get("model.safetensors")
+            .context("fetch model.safetensors")?,
+    ])
 }

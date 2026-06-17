@@ -1,16 +1,8 @@
-//! ChatML prompt formatting. Pure string work — no MLX, no tokenizer here.
-//!
-//! MiniCPM5 uses the ChatML layout:
-//! `<|im_start|>{role}\n{content}<|im_end|>\n`, ending with an open
-//! assistant turn so the model continues from there.
-
 pub struct Turn {
     pub role: &'static str,
     pub content: String,
 }
 
-/// Build a ChatML prompt string from a sequence of turns, leaving the
-/// assistant turn open for generation.
 pub fn chatml(turns: &[Turn]) -> String {
     let mut s = String::new();
     for t in turns {
@@ -24,7 +16,6 @@ pub fn chatml(turns: &[Turn]) -> String {
     s
 }
 
-/// Convenience: optional system prompt + a single user message.
 pub fn simple(system: Option<&str>, user: &str) -> String {
     let mut turns = Vec::new();
     if let Some(sys) = system {

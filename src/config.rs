@@ -1,12 +1,5 @@
-//! Parsing of HuggingFace `config.json` and `generation_config.json`.
-//!
-//! These are pure plumbing — no MLX involved. They normalize the model's
-//! shape knobs into [`ModelArgs`], which `model.rs` consumes.
-
 use serde::Deserialize;
 
-/// Raw subset of HF `config.json` we care about. MiniCPM5-1B is a standard
-/// `LlamaForCausalLM`, so these are the usual Llama fields.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HfConfig {
     pub hidden_size: i32,
@@ -19,7 +12,6 @@ pub struct HfConfig {
     pub rms_norm_eps: f32,
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
-    /// Some configs specify head_dim explicitly; otherwise derive it.
     #[serde(default)]
     pub head_dim: Option<i32>,
     #[serde(default)]
@@ -33,7 +25,6 @@ fn default_rope_theta() -> f32 {
     10_000.0
 }
 
-/// Normalized architecture args consumed by `model.rs`.
 #[derive(Debug, Clone)]
 pub struct ModelArgs {
     pub dim: i32,
@@ -66,16 +57,12 @@ impl From<HfConfig> for ModelArgs {
     }
 }
 
-/// `generation_config.json` — we only need the stop tokens. MiniCPM5 stops on
-/// `[1, 130073]` (`</s>` and `<|im_end|>`); honoring the full list requires
-/// reading this rather than assuming a single EOS.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct GenerationConfig {
     #[serde(default, deserialize_with = "de_eos")]
     pub eos_token_id: Vec<u32>,
 }
 
-/// `eos_token_id` is either a single int or an array of ints in the wild.
 fn de_eos<'de, D>(d: D) -> Result<Vec<u32>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -89,12 +76,13 @@ where
             .filter_map(|x| x.as_u64().map(|n| n as u32))
             .collect()),
         serde_json::Value::Null => Ok(vec![]),
-        other => Err(D::Error::custom(format!("unexpected eos_token_id: {other}"))),
+        other => Err(D::Error::custom(format!(
+            "unexpected eos_token_id: {other}"
+        ))),
     }
 }
 
 impl GenerationConfig {
-    /// Fall back to MiniCPM5's known stop tokens if the file is absent/empty.
     pub fn eos_or_default(&self) -> Vec<u32> {
         if self.eos_token_id.is_empty() {
             vec![1, 130073]

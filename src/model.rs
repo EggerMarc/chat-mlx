@@ -11,6 +11,7 @@
 //! so `load_safetensors` maps the official weights with no remapping.
 
 use mlx_rs::{
+    builder::Builder,
     error::Exception,
     fast::scaled_dot_product_attention,
     macros::{ModuleParameters, Quantizable},
@@ -122,7 +123,7 @@ impl Attention {
         }
 
         // GQA repeat is handled inside the fused SDPA kernel.
-        let out = scaled_dot_product_attention(q, &k, &v, self.scale, mask.map(Into::into), None)?;
+        let out = scaled_dot_product_attention(q, &k, &v, self.scale, mask.map(Into::into))?;
         let out = out.transpose_axes(&[0, 2, 1, 3])?.reshape(&[B, L, -1])?;
         let out = self.o_proj.forward(&out)?;
 

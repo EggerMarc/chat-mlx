@@ -36,7 +36,7 @@ quantize at runtime.
 
 ## Status / TODO
 
-- [ ] First successful generate on bf16 weights
+- [x] First successful generate on bf16 weights (MiniCPM5-1B, greedy, coherent output)
 - [ ] top-p / top-k sampling (only greedy + temperature today)
 - [ ] load pre-quantized `*-MLX` safetensors directly
 - [ ] tokens/sec timing + a custom fused Metal kernel experiment
