@@ -1,0 +1,293 @@
+//! The MiniCPM5 / Llama-family architecture.
+//!
+//! This is the part we *own*. Every layer here is an mlx-rs `nn` module
+//! (the framework owns the math + weights storage); this file owns the
+//! *wiring* — which module runs in what order, the residual structure, and
+//! the config knobs. A different family (Qwen3, Gemma, Phi) would be a
+//! sibling file with the same bricks ordered differently.
+//!
+//! Struct field names deliberately mirror HuggingFace tensor keys
+//! (`model.embed_tokens`, `model.layers.N.self_attn.q_proj`, `lm_head`, …)
+//! so `load_safetensors` maps the official weights with no remapping.
+
+use mlx_rs::{
+    error::Exception,
+    fast::scaled_dot_product_attention,
+    macros::{ModuleParameters, Quantizable},
+    module::Module,
+    nn,
+    ops::concatenate_axis,
+    quantization::MaybeQuantized,
+    Array,
+};
+
+use crate::config::ModelArgs;
+
+/// Per-layer KV cache entry: `(keys, values)` shaped `[B, n_kv_heads, T, head_dim]`.
+pub type LayerCache = Option<(Array, Array)>;
+pub type Cache = Vec<LayerCache>;
+
+// ---------------------------------------------------------------------------
+// Attention
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, ModuleParameters, Quantizable)]
+pub struct Attention {
+    n_heads: i32,
+    n_kv_heads: i32,
+    scale: f32,
+
+    #[quantizable]
+    #[param]
+    q_proj: MaybeQuantized<nn::Linear>,
+    #[quantizable]
+    #[param]
+    k_proj: MaybeQuantized<nn::Linear>,
+    #[quantizable]
+    #[param]
+    v_proj: MaybeQuantized<nn::Linear>,
+    #[quantizable]
+    #[param]
+    o_proj: MaybeQuantized<nn::Linear>,
+
+    #[param]
+    rope: nn::Rope,
+}
+
+impl Attention {
+    fn new(args: &ModelArgs) -> Result<Self, Exception> {
+        let q_dim = args.n_heads * args.head_dim;
+        let kv_dim = args.n_kv_heads * args.head_dim;
+
+        let q_proj = nn::LinearBuilder::new(args.dim, q_dim).bias(false).build()?;
+        let k_proj = nn::LinearBuilder::new(args.dim, kv_dim).bias(false).build()?;
+        let v_proj = nn::LinearBuilder::new(args.dim, kv_dim).bias(false).build()?;
+        let o_proj = nn::LinearBuilder::new(q_dim, args.dim).bias(false).build()?;
+
+        // Llama/MiniCPM use NeoX-style ("rotate-half") RoPE -> traditional(false).
+        let rope = nn::RopeBuilder::new(args.head_dim)
+            .traditional(false)
+            .base(args.rope_theta)
+            .build()?;
+
+        Ok(Self {
+            n_heads: args.n_heads,
+            n_kv_heads: args.n_kv_heads,
+            scale: (args.head_dim as f32).powf(-0.5),
+            q_proj: MaybeQuantized::new(q_proj),
+            k_proj: MaybeQuantized::new(k_proj),
+            v_proj: MaybeQuantized::new(v_proj),
+            o_proj: MaybeQuantized::new(o_proj),
+            rope,
+        })
+    }
+
+    #[allow(non_snake_case)]
+    fn forward(
+        &mut self,
+        x: &Array,
+        mask: Option<&Array>,
+        cache: Option<&(Array, Array)>,
+    ) -> Result<(Array, (Array, Array)), Exception> {
+        let B = x.shape()[0];
+        let L = x.shape()[1];
+
+        let mut q = self.q_proj.forward(x)?;
+        let mut k = self.k_proj.forward(x)?;
+        let mut v = self.v_proj.forward(x)?;
+
+        // [B, L, n_heads, head_dim] -> [B, n_heads, L, head_dim]
+        q = q
+            .reshape(&[B, L, self.n_heads, -1])?
+            .transpose_axes(&[0, 2, 1, 3])?;
+        k = k
+            .reshape(&[B, L, self.n_kv_heads, -1])?
+            .transpose_axes(&[0, 2, 1, 3])?;
+        v = v
+            .reshape(&[B, L, self.n_kv_heads, -1])?
+            .transpose_axes(&[0, 2, 1, 3])?;
+
+        match cache {
+            Some((kc, vc)) => {
+                let offset = kc.shape()[2];
+                q = self.rope.forward((&q, offset))?;
+                k = self.rope.forward((&k, offset))?;
+                k = concatenate_axis(&[kc, &k], 2)?;
+                v = concatenate_axis(&[vc, &v], 2)?;
+            }
+            None => {
+                q = self.rope.forward(&q)?;
+                k = self.rope.forward(&k)?;
+            }
+        }
+
+        // GQA repeat is handled inside the fused SDPA kernel.
+        let out = scaled_dot_product_attention(q, &k, &v, self.scale, mask.map(Into::into), None)?;
+        let out = out.transpose_axes(&[0, 2, 1, 3])?.reshape(&[B, L, -1])?;
+        let out = self.o_proj.forward(&out)?;
+
+        Ok((out, (k, v)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MLP (SwiGLU)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, ModuleParameters, Quantizable)]
+pub struct Mlp {
+    #[quantizable]
+    #[param]
+    gate_proj: MaybeQuantized<nn::Linear>,
+    #[quantizable]
+    #[param]
+    up_proj: MaybeQuantized<nn::Linear>,
+    #[quantizable]
+    #[param]
+    down_proj: MaybeQuantized<nn::Linear>,
+}
+
+impl Mlp {
+    fn new(args: &ModelArgs) -> Result<Self, Exception> {
+        let gate_proj = nn::LinearBuilder::new(args.dim, args.hidden_dim)
+            .bias(false)
+            .build()?;
+        let up_proj = nn::LinearBuilder::new(args.dim, args.hidden_dim)
+            .bias(false)
+            .build()?;
+        let down_proj = nn::LinearBuilder::new(args.hidden_dim, args.dim)
+            .bias(false)
+            .build()?;
+        Ok(Self {
+            gate_proj: MaybeQuantized::new(gate_proj),
+            up_proj: MaybeQuantized::new(up_proj),
+            down_proj: MaybeQuantized::new(down_proj),
+        })
+    }
+
+    fn forward(&mut self, x: &Array) -> Result<Array, Exception> {
+        let gated = nn::silu(self.gate_proj.forward(x)?)?.multiply(self.up_proj.forward(x)?)?;
+        self.down_proj.forward(&gated)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decoder layer
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, ModuleParameters, Quantizable)]
+pub struct DecoderLayer {
+    #[quantizable]
+    #[param]
+    self_attn: Attention,
+    #[quantizable]
+    #[param]
+    mlp: Mlp,
+    #[param]
+    input_layernorm: nn::RmsNorm,
+    #[param]
+    post_attention_layernorm: nn::RmsNorm,
+}
+
+impl DecoderLayer {
+    fn new(args: &ModelArgs) -> Result<Self, Exception> {
+        Ok(Self {
+            self_attn: Attention::new(args)?,
+            mlp: Mlp::new(args)?,
+            input_layernorm: nn::RmsNormBuilder::new(args.dim).eps(args.norm_eps).build()?,
+            post_attention_layernorm: nn::RmsNormBuilder::new(args.dim)
+                .eps(args.norm_eps)
+                .build()?,
+        })
+    }
+
+    fn forward(
+        &mut self,
+        x: &Array,
+        mask: Option<&Array>,
+        cache: Option<&(Array, Array)>,
+    ) -> Result<(Array, (Array, Array)), Exception> {
+        let normed = self.input_layernorm.forward(x)?;
+        let (attn, kv) = self.self_attn.forward(&normed, mask, cache)?;
+        let h = x.add(attn)?;
+        let ff = self.mlp.forward(&self.post_attention_layernorm.forward(&h)?)?;
+        let out = h.add(ff)?;
+        Ok((out, kv))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backbone + LM head
+// ---------------------------------------------------------------------------
+
+/// The transformer trunk. Field name `model` is intentional: it makes the
+/// flattened parameter paths read `model.embed_tokens.weight`,
+/// `model.layers.N.…`, `model.norm.weight` — matching HF exactly.
+#[derive(Debug, Clone, ModuleParameters, Quantizable)]
+pub struct Backbone {
+    #[quantizable]
+    #[param]
+    embed_tokens: MaybeQuantized<nn::Embedding>,
+    #[quantizable]
+    #[param]
+    layers: Vec<DecoderLayer>,
+    #[param]
+    norm: nn::RmsNorm,
+}
+
+#[derive(Debug, Clone, ModuleParameters, Quantizable)]
+pub struct Model {
+    #[quantizable]
+    #[param]
+    model: Backbone,
+    #[quantizable]
+    #[param]
+    lm_head: MaybeQuantized<nn::Linear>,
+}
+
+impl Model {
+    pub fn new(args: &ModelArgs) -> Result<Self, Exception> {
+        let embed_tokens = nn::Embedding::new(args.vocab_size, args.dim)?;
+        let layers = (0..args.n_layers)
+            .map(|_| DecoderLayer::new(args))
+            .collect::<Result<Vec<_>, _>>()?;
+        let norm = nn::RmsNormBuilder::new(args.dim).eps(args.norm_eps).build()?;
+        let lm_head = nn::LinearBuilder::new(args.dim, args.vocab_size)
+            .bias(false)
+            .build()?;
+
+        Ok(Self {
+            model: Backbone {
+                embed_tokens: MaybeQuantized::new(embed_tokens),
+                layers,
+                norm,
+            },
+            lm_head: MaybeQuantized::new(lm_head),
+        })
+    }
+
+    /// One forward pass. `tokens` is `[B, L]`; returns `([B, L, vocab], cache)`.
+    pub fn forward(&mut self, tokens: &Array, cache: &Cache) -> Result<(Array, Cache), Exception> {
+        let mut h = self.model.embed_tokens.forward(tokens)?;
+
+        // Causal mask only needed when processing more than one position (prefill).
+        let mask = if h.shape()[1] > 1 {
+            let m = nn::MultiHeadAttention::create_additive_causal_mask::<f32>(h.shape()[1])?;
+            Some(m.as_dtype(h.dtype())?)
+        } else {
+            None
+        };
+
+        let mut new_cache = Vec::with_capacity(self.model.layers.len());
+        for (i, layer) in self.model.layers.iter_mut().enumerate() {
+            let entry = cache.get(i).and_then(Option::as_ref);
+            let (out, kv) = layer.forward(&h, mask.as_ref(), entry)?;
+            h = out;
+            new_cache.push(Some(kv));
+        }
+
+        let h = self.model.norm.forward(&h)?;
+        let logits = self.lm_head.forward(&h)?;
+        Ok((logits, new_cache))
+    }
+}
