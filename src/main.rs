@@ -53,6 +53,9 @@ struct Cli {
     #[clap(long)]
     top_p: Option<f32>,
 
+    #[clap(long, default_value = "8")]
+    tokens_per_eval: usize,
+
     /// Runtime-quantize the loaded fp weights to 4-bit (group size 64).
     #[clap(long)]
     quantize: bool,
@@ -126,6 +129,7 @@ fn main() -> Result<()> {
         &opts,
         &mut rng,
         &eos,
+        cli.tokens_per_eval,
         |id| {
             if let Ok(Some(s)) = stream.step(id) {
                 print!("{s}");

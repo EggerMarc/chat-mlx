@@ -26,8 +26,10 @@ pub fn generate<F: FnMut(u32)>(
     opts: &SampleOpts,
     rng: &mut StdRng,
     eos: &[u32],
+    tokens_per_eval: usize,
     mut on_token: F,
 ) -> Result<GenStats> {
+    let host_sampling = opts.top_k.is_some() || opts.top_p.is_some();
     let prompt = Array::from(prompt_ids).index(NewAxis);
 
     let t_prefill = Instant::now();
@@ -40,20 +42,58 @@ pub fn generate<F: FnMut(u32)>(
 
     let t_decode = Instant::now();
     let mut out = Vec::with_capacity(max_tokens);
-    for _ in 0..max_tokens {
-        let id = y.item::<u32>();
-        if eos.contains(&id) {
-            break;
-        }
-        on_token(id);
-        out.push(id);
 
-        let next = y.index((.., NewAxis));
-        let (logits, new_cache) = model.forward(&next, &cache)?;
-        cache = new_cache;
-        let logits = logits.squeeze_axes(&[1])?;
-        y = sample(&logits, opts, rng)?;
-        eval([&y])?;
+    if host_sampling {
+        for _ in 0..max_tokens {
+            let id = y.item::<u32>();
+            if eos.contains(&id) {
+                break;
+            }
+            on_token(id);
+            out.push(id);
+
+            let next = y.index((.., NewAxis));
+            let (logits, new_cache) = model.forward(&next, &cache)?;
+            cache = new_cache;
+            let logits = logits.squeeze_axes(&[1])?;
+            y = sample(&logits, opts, rng)?;
+            eval([&y])?;
+        }
+    } else {
+        let id0 = y.item::<u32>();
+        let mut done = eos.contains(&id0);
+        if !done {
+            on_token(id0);
+            out.push(id0);
+        }
+
+        let batch_size = tokens_per_eval.max(1);
+        while out.len() < max_tokens && !done {
+            let mut batch: Vec<Array> = Vec::with_capacity(batch_size);
+            while batch.len() < batch_size && (out.len() + batch.len()) < max_tokens {
+                let next = y.index((.., NewAxis));
+                let (logits, new_cache) = model.forward(&next, &cache)?;
+                cache = new_cache;
+                let logits = logits.squeeze_axes(&[1])?;
+                y = sample(&logits, opts, rng)?;
+                batch.push(y.clone());
+            }
+
+            eval(&batch)?;
+            for a in &batch {
+                let id = a.item::<u32>();
+                if eos.contains(&id) {
+                    done = true;
+                    break;
+                }
+                on_token(id);
+                out.push(id);
+                if out.len() >= max_tokens {
+                    done = true;
+                    break;
+                }
+            }
+        }
     }
     let decode_secs = t_decode.elapsed().as_secs_f64();
 

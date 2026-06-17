@@ -34,6 +34,21 @@ Default model: `openbmb/MiniCPM5-1B` (bf16). The 4-bit `openbmb/MiniCPM5-1B-MLX`
 needs pre-quantized loading (TODO); for now load bf16 and pass `--quantize` to
 quantize at runtime.
 
+## Perf (MiniCPM5-1B, M-series, decode tok/s)
+
+| build / config | decode tok/s |
+| --- | --- |
+| debug | ~7.6 |
+| release (bf16) | ~27 |
+| release + `--quantize` (4-bit), tpe=8 | ~77 |
+| release + `--quantize` (4-bit), tpe=16 | ~83 |
+
+Decode is memory-bandwidth bound on the per-token weight read. Quantization is
+the dominant lever (~3x). `--tokens-per-eval` batches MLX eval to amortize the
+GPU<->host sync: nil effect on bf16 (sync is noise vs the weight read), ~+14% in
+the 4-bit regime where decode is fast enough that sync starts to matter. Sampling
+method (greedy / temp / top-p) does not affect throughput.
+
 ## Status / TODO
 
 - [x] First successful generate on bf16 weights (MiniCPM5-1B, greedy, coherent output)
