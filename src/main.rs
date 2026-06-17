@@ -12,11 +12,13 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use hf_hub::{Repo, RepoType, api::sync::Api, api::sync::ApiRepo};
 use mlx_rs::module::ModuleParametersExt;
+use rand::{SeedableRng, rngs::StdRng};
 use tokenizers::Tokenizer;
 
 use crate::{
     config::{GenerationConfig, HfConfig, ModelArgs},
     model::Model,
+    sampler::SampleOpts,
 };
 
 #[derive(Parser)]
@@ -44,6 +46,12 @@ struct Cli {
     /// Sampling temperature (0.0 = greedy).
     #[clap(long, default_value = "0.0")]
     temp: f32,
+
+    #[clap(long)]
+    top_k: Option<usize>,
+
+    #[clap(long)]
+    top_p: Option<f32>,
 
     /// Runtime-quantize the loaded fp weights to 4-bit (group size 64).
     #[clap(long)]
@@ -103,13 +111,40 @@ fn main() -> Result<()> {
     print!("{}", cli.prompt);
     let _ = std::io::stdout().flush();
 
-    let generated = generate::generate(&mut m, ids, cli.max_tokens, cli.temp, &eos, |_id| {})?;
+    let opts = SampleOpts {
+        temp: cli.temp,
+        top_k: cli.top_k,
+        top_p: cli.top_p,
+    };
+    let mut rng = StdRng::seed_from_u64(cli.seed);
+    let mut stream = tokenizer.decode_stream(true);
 
-    let text = tokenizer
-        .decode(&generated, true)
-        .map_err(|e| anyhow::anyhow!(e))?;
-    println!("\n{text}");
-    eprintln!("\n[info] generated {} tokens", generated.len());
+    let stats = generate::generate(
+        &mut m,
+        ids,
+        cli.max_tokens,
+        &opts,
+        &mut rng,
+        &eos,
+        |id| {
+            if let Ok(Some(s)) = stream.step(id) {
+                print!("{s}");
+                let _ = std::io::stdout().flush();
+            }
+        },
+    )?;
+    println!();
+
+    let n = stats.tokens.len();
+    eprintln!(
+        "[info] prefill {} tok in {:.3}s ({:.1} tok/s) | decode {} tok in {:.3}s ({:.1} tok/s)",
+        ids.len(),
+        stats.prefill_secs,
+        ids.len() as f64 / stats.prefill_secs.max(1e-9),
+        n,
+        stats.decode_secs,
+        n as f64 / stats.decode_secs.max(1e-9),
+    );
 
     Ok(())
 }

@@ -1,16 +1,5 @@
-//! The MiniCPM5 / Llama-family architecture.
-//!
-//! This is the part we *own*. Every layer here is an mlx-rs `nn` module
-//! (the framework owns the math + weights storage); this file owns the
-//! *wiring* — which module runs in what order, the residual structure, and
-//! the config knobs. A different family (Qwen3, Gemma, Phi) would be a
-//! sibling file with the same bricks ordered differently.
-//!
-//! Struct field names deliberately mirror HuggingFace tensor keys
-//! (`model.embed_tokens`, `model.layers.N.self_attn.q_proj`, `lm_head`, …)
-//! so `load_safetensors` maps the official weights with no remapping.
-
 use mlx_rs::{
+    Array,
     builder::Builder,
     error::Exception,
     fast::scaled_dot_product_attention,
@@ -19,18 +8,12 @@ use mlx_rs::{
     nn,
     ops::concatenate_axis,
     quantization::MaybeQuantized,
-    Array,
 };
 
 use crate::config::ModelArgs;
 
-/// Per-layer KV cache entry: `(keys, values)` shaped `[B, n_kv_heads, T, head_dim]`.
 pub type LayerCache = Option<(Array, Array)>;
 pub type Cache = Vec<LayerCache>;
-
-// ---------------------------------------------------------------------------
-// Attention
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, ModuleParameters, Quantizable)]
 pub struct Attention {
@@ -60,12 +43,19 @@ impl Attention {
         let q_dim = args.n_heads * args.head_dim;
         let kv_dim = args.n_kv_heads * args.head_dim;
 
-        let q_proj = nn::LinearBuilder::new(args.dim, q_dim).bias(false).build()?;
-        let k_proj = nn::LinearBuilder::new(args.dim, kv_dim).bias(false).build()?;
-        let v_proj = nn::LinearBuilder::new(args.dim, kv_dim).bias(false).build()?;
-        let o_proj = nn::LinearBuilder::new(q_dim, args.dim).bias(false).build()?;
+        let q_proj = nn::LinearBuilder::new(args.dim, q_dim)
+            .bias(false)
+            .build()?;
+        let k_proj = nn::LinearBuilder::new(args.dim, kv_dim)
+            .bias(false)
+            .build()?;
+        let v_proj = nn::LinearBuilder::new(args.dim, kv_dim)
+            .bias(false)
+            .build()?;
+        let o_proj = nn::LinearBuilder::new(q_dim, args.dim)
+            .bias(false)
+            .build()?;
 
-        // Llama/MiniCPM use NeoX-style ("rotate-half") RoPE -> traditional(false).
         let rope = nn::RopeBuilder::new(args.head_dim)
             .traditional(false)
             .base(args.rope_theta)
@@ -122,7 +112,6 @@ impl Attention {
             }
         }
 
-        // GQA repeat is handled inside the fused SDPA kernel.
         let out = scaled_dot_product_attention(q, &k, &v, self.scale, mask.map(Into::into))?;
         let out = out.transpose_axes(&[0, 2, 1, 3])?.reshape(&[B, L, -1])?;
         let out = self.o_proj.forward(&out)?;
@@ -130,10 +119,6 @@ impl Attention {
         Ok((out, (k, v)))
     }
 }
-
-// ---------------------------------------------------------------------------
-// MLP (SwiGLU)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, ModuleParameters, Quantizable)]
 pub struct Mlp {
@@ -172,10 +157,6 @@ impl Mlp {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Decoder layer
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, ModuleParameters, Quantizable)]
 pub struct DecoderLayer {
     #[quantizable]
@@ -195,7 +176,9 @@ impl DecoderLayer {
         Ok(Self {
             self_attn: Attention::new(args)?,
             mlp: Mlp::new(args)?,
-            input_layernorm: nn::RmsNormBuilder::new(args.dim).eps(args.norm_eps).build()?,
+            input_layernorm: nn::RmsNormBuilder::new(args.dim)
+                .eps(args.norm_eps)
+                .build()?,
             post_attention_layernorm: nn::RmsNormBuilder::new(args.dim)
                 .eps(args.norm_eps)
                 .build()?,
@@ -211,19 +194,14 @@ impl DecoderLayer {
         let normed = self.input_layernorm.forward(x)?;
         let (attn, kv) = self.self_attn.forward(&normed, mask, cache)?;
         let h = x.add(attn)?;
-        let ff = self.mlp.forward(&self.post_attention_layernorm.forward(&h)?)?;
+        let ff = self
+            .mlp
+            .forward(&self.post_attention_layernorm.forward(&h)?)?;
         let out = h.add(ff)?;
         Ok((out, kv))
     }
 }
 
-// ---------------------------------------------------------------------------
-// Backbone + LM head
-// ---------------------------------------------------------------------------
-
-/// The transformer trunk. Field name `model` is intentional: it makes the
-/// flattened parameter paths read `model.embed_tokens.weight`,
-/// `model.layers.N.…`, `model.norm.weight` — matching HF exactly.
 #[derive(Debug, Clone, ModuleParameters, Quantizable)]
 pub struct Backbone {
     #[quantizable]
@@ -252,7 +230,9 @@ impl Model {
         let layers = (0..args.n_layers)
             .map(|_| DecoderLayer::new(args))
             .collect::<Result<Vec<_>, _>>()?;
-        let norm = nn::RmsNormBuilder::new(args.dim).eps(args.norm_eps).build()?;
+        let norm = nn::RmsNormBuilder::new(args.dim)
+            .eps(args.norm_eps)
+            .build()?;
         let lm_head = nn::LinearBuilder::new(args.dim, args.vocab_size)
             .bias(false)
             .build()?;
@@ -267,11 +247,9 @@ impl Model {
         })
     }
 
-    /// One forward pass. `tokens` is `[B, L]`; returns `([B, L, vocab], cache)`.
     pub fn forward(&mut self, tokens: &Array, cache: &Cache) -> Result<(Array, Cache), Exception> {
         let mut h = self.model.embed_tokens.forward(tokens)?;
 
-        // Causal mask only needed when processing more than one position (prefill).
         let mask = if h.shape()[1] > 1 {
             let m = nn::MultiHeadAttention::create_additive_causal_mask::<f32>(h.shape()[1])?;
             Some(m.as_dtype(h.dtype())?)

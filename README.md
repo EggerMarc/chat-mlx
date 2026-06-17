@@ -37,7 +37,10 @@ quantize at runtime.
 ## Status / TODO
 
 - [x] First successful generate on bf16 weights (MiniCPM5-1B, greedy, coherent output)
-- [ ] top-p / top-k sampling (only greedy + temperature today)
+- [x] top-p / top-k / temperature sampling (host-side, seeded)
+- [x] live streaming output (decode_stream)
+- [x] tokens/sec timing (prefill vs decode)
 - [ ] load pre-quantized `*-MLX` safetensors directly
-- [ ] tokens/sec timing + a custom fused Metal kernel experiment
+- [ ] release-build perf pass (top-k via select_nth_unstable; on-device sampler)
+- [ ] a custom fused Metal kernel experiment
 - [ ] port the `model.rs` + `generate.rs` core into `providers/mlx`
