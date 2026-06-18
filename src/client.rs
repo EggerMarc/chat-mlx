@@ -5,6 +5,7 @@ use tokenizers::Tokenizer;
 
 use crate::engine::config::ModelArgs;
 use crate::engine::model::Model;
+use crate::parsers::tool::ToolFormat;
 
 /// Local-inference client backed by a loaded MLX `Model`.
 ///
@@ -22,6 +23,7 @@ pub struct MlxClient {
     pub(crate) tokens_per_eval: usize,
     pub(crate) max_context: Option<i32>,
     pub(crate) sink_tokens: i32,
+    pub(crate) format: Arc<dyn ToolFormat>,
     pub(crate) meta: Arc<ProviderMeta>,
 }
 

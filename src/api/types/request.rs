@@ -1,12 +1,14 @@
+use chat_core::error::ChatFailure;
 use chat_core::types::messages::Messages;
 use chat_core::types::messages::content::RoleEnum;
 use chat_core::types::messages::parts::PartEnum;
 use chat_core::types::options::ChatOptions;
+use serde_json::Value;
 
 use crate::api::types::error::unsupported;
 use crate::engine::sampler::SampleOpts;
 use crate::engine::template::{Turn, chatml};
-use chat_core::error::ChatFailure;
+use crate::parsers::tool::ToolFormat;
 
 const DEFAULT_MAX_TOKENS: usize = 512;
 
@@ -18,31 +20,68 @@ pub struct Prepared {
 }
 
 /// Lower chat-core `Messages` + `ChatOptions` into a prompt string and sampling
-/// config. Tool declarations and structured output are rejected for now (they
-/// land in later phases), mirroring how `chat-mistralrs` rejects unsupported
-/// parts.
+/// config. When `tools` is `Some`, the declarations are advertised in the
+/// system prompt and prior `Tool` parts (calls + results) are rendered back
+/// using `format`. Structured output is still rejected (Phase 3).
 pub fn from_core(
     messages: &Messages,
     options: Option<&ChatOptions>,
     structured_output: Option<&schemars::Schema>,
-    tools_present: bool,
+    tools: Option<&Value>,
+    format: &dyn ToolFormat,
 ) -> Result<Prepared, ChatFailure> {
-    if tools_present {
-        return Err(unsupported("tool declarations"));
-    }
     if structured_output.is_some() {
         return Err(unsupported("structured outputs"));
     }
 
-    let mut turns = Vec::with_capacity(messages.0.len());
-    for content in &messages.0 {
-        turns.push(Turn {
-            role: map_role(&content.role),
-            content: flatten_text(&content.parts.0)?,
-        });
-    }
-    let prompt = chatml(&turns);
+    let mut turns: Vec<Turn> = Vec::new();
+    let mut injected = false;
 
+    for content in &messages.0 {
+        match content.role {
+            RoleEnum::System => {
+                let base = flatten_text(&content.parts.0);
+                let body = match tools {
+                    Some(t) => {
+                        injected = true;
+                        format.system_with_tools(&base, t)
+                    }
+                    None => base,
+                };
+                turns.push(Turn {
+                    role: "system",
+                    content: body,
+                });
+            }
+            RoleEnum::User => turns.push(Turn {
+                role: "user",
+                content: flatten_text(&content.parts.0),
+            }),
+            RoleEnum::Model => {
+                let (assistant, results) = render_model(&content.parts.0, format)?;
+                turns.push(Turn {
+                    role: "assistant",
+                    content: assistant,
+                });
+                turns.extend(results);
+            }
+        }
+    }
+
+    // Tools present but no system message to host them: prepend one.
+    if let Some(t) = tools
+        && !injected
+    {
+        turns.insert(
+            0,
+            Turn {
+                role: "system",
+                content: format.system_with_tools("", t),
+            },
+        );
+    }
+
+    let prompt = chatml(&turns);
     let (sampler, max_tokens) = sampler_from_options(options);
     Ok(Prepared {
         prompt,
@@ -51,34 +90,56 @@ pub fn from_core(
     })
 }
 
-fn map_role(role: &RoleEnum) -> &'static str {
-    match role {
-        RoleEnum::User => "user",
-        RoleEnum::System => "system",
-        RoleEnum::Model => "assistant",
-    }
-}
-
-/// Collect all `Text` parts into one newline-joined string. Other part types
-/// are not supported on the input path yet.
-fn flatten_text(parts: &[PartEnum]) -> Result<String, ChatFailure> {
+fn flatten_text(parts: &[PartEnum]) -> String {
     let mut buf = String::new();
     for part in parts {
+        if let PartEnum::Text(t) = part {
+            append_line(&mut buf, t.as_str());
+        }
+    }
+    buf
+}
+
+/// Render a model turn: text parts + tool calls go into the assistant content;
+/// each resolved tool result becomes its own follow-up turn.
+fn render_model(
+    parts: &[PartEnum],
+    format: &dyn ToolFormat,
+) -> Result<(String, Vec<Turn>), ChatFailure> {
+    let mut content = String::new();
+    let mut results = Vec::new();
+    for part in parts {
         match part {
-            PartEnum::Text(t) => {
-                if !buf.is_empty() {
-                    buf.push('\n');
+            PartEnum::Text(t) => append_line(&mut content, t.as_str()),
+            // Prior chain-of-thought is not re-fed to the model.
+            PartEnum::Reasoning(_) => {}
+            PartEnum::Tool(tool) => {
+                let (call, response) = tool.to_tuple();
+                append_line(&mut content, &format.render_call(&call));
+                if let Some(resp) = response {
+                    let (role, body) = format.render_result(&resp);
+                    results.push(Turn {
+                        role,
+                        content: body,
+                    });
                 }
-                buf.push_str(t.as_str());
             }
-            PartEnum::Reasoning(_) => return Err(unsupported("reasoning parts in input")),
-            PartEnum::Tool(_) => return Err(unsupported("tool parts")),
-            PartEnum::Structured(_) => return Err(unsupported("structured parts in input")),
+            PartEnum::Structured(_) => {}
             PartEnum::File(_) => return Err(unsupported("file parts")),
             PartEnum::Embeddings(_) => return Err(unsupported("embedding parts in input")),
         }
     }
-    Ok(buf)
+    Ok((content, results))
+}
+
+fn append_line(buf: &mut String, s: &str) {
+    if s.is_empty() {
+        return;
+    }
+    if !buf.is_empty() {
+        buf.push('\n');
+    }
+    buf.push_str(s);
 }
 
 fn sampler_from_options(options: Option<&ChatOptions>) -> (SampleOpts, usize) {

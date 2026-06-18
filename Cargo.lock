@@ -261,12 +261,16 @@ dependencies = [
  "clap",
  "futures",
  "hf-hub",
+ "inventory",
  "mlx-rs",
  "schemars",
  "serde",
  "serde_json",
  "tokenizers",
  "tokio",
+ "tools-rs",
+ "tools_core",
+ "tools_macros",
 ]
 
 [[package]]

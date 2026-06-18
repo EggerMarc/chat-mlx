@@ -6,6 +6,7 @@ use chat_core::types::provider_meta::ProviderMeta;
 
 use crate::client::MlxClient;
 use crate::loader;
+use crate::parsers::tool::{self, Pattern, ToolFormat};
 
 /// Typestate marker — no model id set yet, `build()` is not callable.
 pub struct WithoutModel;
@@ -24,6 +25,7 @@ pub struct MlxBuilder<M = WithoutModel> {
     tokens_per_eval: usize,
     max_context: Option<i32>,
     sink_tokens: i32,
+    format: Option<Arc<dyn ToolFormat>>,
     description: Option<String>,
     _m: PhantomData<M>,
 }
@@ -42,6 +44,7 @@ impl MlxBuilder<WithoutModel> {
             tokens_per_eval: 8,
             max_context: Some(4096),
             sink_tokens: 4,
+            format: None,
             description: None,
             _m: PhantomData,
         }
@@ -56,6 +59,7 @@ impl MlxBuilder<WithoutModel> {
             tokens_per_eval: self.tokens_per_eval,
             max_context: self.max_context,
             sink_tokens: self.sink_tokens,
+            format: self.format,
             description: self.description,
             _m: PhantomData,
         }
@@ -92,6 +96,22 @@ impl<M> MlxBuilder<M> {
         self.description = Some(d.into());
         self
     }
+
+    /// Override the auto-detected tool-call format with a specific one.
+    pub fn with_tool_format(mut self, format: Arc<dyn ToolFormat>) -> Self {
+        self.format = Some(format);
+        self
+    }
+
+    /// Parse tool calls from output using custom delimiters: everything between
+    /// `open` and `close` is treated as the call JSON. Overrides detection.
+    pub fn with_tool_pattern(mut self, open: impl Into<String>, close: impl Into<String>) -> Self {
+        self.format = Some(Arc::new(Pattern {
+            open: open.into(),
+            close: close.into(),
+        }));
+        self
+    }
 }
 
 impl MlxBuilder<WithModel> {
@@ -104,6 +124,10 @@ impl MlxBuilder<WithModel> {
                 "chat-mlx failed to load {model_id}: {e}"
             )))
         })?;
+
+        let format = self
+            .format
+            .unwrap_or_else(|| tool::detect(&loaded.model_type));
 
         let meta = Arc::new(ProviderMeta {
             description: self.description,
@@ -119,6 +143,7 @@ impl MlxBuilder<WithModel> {
             tokens_per_eval: self.tokens_per_eval,
             max_context: self.max_context,
             sink_tokens: self.sink_tokens,
+            format,
             meta,
         })
     }

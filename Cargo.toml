@@ -29,6 +29,7 @@ hf-hub = "0.4"
 
 # chat-rs provider surface. core is 0.4.2; 0.5.3 is the chat-rs umbrella version.
 chat-core = { path = "../chat-rs/core", version = "0.4.2", features=["stream"] }
+tools-rs = "0.3"
 async-trait = "0.1"
 schemars = "1"
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
@@ -40,6 +41,12 @@ anyhow = "1"
 
 async-stream = { version = "0.3", optional = true }
 futures = { version = "0.3", optional = true }
+
+[dev-dependencies]
+# Needed by the `#[tool]` / `collect_tools!` macros used in examples/tools.rs.
+tools_core = "0.3"
+tools_macros = "0.3"
+inventory = "0.3"
 
 [features]
 default = ["stream"]

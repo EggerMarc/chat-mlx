@@ -11,6 +11,7 @@ use chat_core::types::tools::ToolDeclarations;
 use crate::api::types::{error, request, response};
 use crate::client::MlxClient;
 use crate::engine::generate;
+use crate::parsers::reasoning;
 
 #[async_trait]
 impl CompletionProvider for MlxClient {
@@ -21,11 +22,20 @@ impl CompletionProvider for MlxClient {
         options: Option<&ChatOptions>,
         structured_output: Option<&schemars::Schema>,
     ) -> Result<ChatResponse, ChatFailure> {
+        let tools = match tool_declarations {
+            Some(d) => Some(
+                d.json()
+                    .map_err(|e| error::provider(format!("tool declarations: {e}")))?,
+            ),
+            None => None,
+        };
+
         let prepared = request::from_core(
             messages,
             options,
             structured_output,
-            tool_declarations.is_some(),
+            tools.as_ref(),
+            &*self.format,
         )?;
 
         let encoding = self
@@ -56,14 +66,24 @@ impl CompletionProvider for MlxClient {
         .map_err(|e| error::provider(format!("generation failed: {e}")))?;
         drop(model);
 
-        let text = self
+        let raw = self
             .tokenizer
             .decode(&stats.tokens, true)
             .map_err(|e| error::invalid(format!("tokenizer decode: {e}")))?;
 
-        Ok(response::into_core(
+        let (reasoning_text, body) = reasoning::split(&raw);
+        let (calls, text) = if tools.is_some() {
+            let parsed = self.format.parse(&body);
+            (parsed.calls, parsed.text)
+        } else {
+            (Vec::new(), body)
+        };
+
+        Ok(response::build(
             &self.model_id,
+            reasoning_text,
             text,
+            calls,
             input_tokens,
             stats.tokens.len(),
             prepared.max_tokens,

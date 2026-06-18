@@ -22,11 +22,21 @@ impl StreamProvider for MlxClient {
         tool_declarations: Option<&dyn ToolDeclarations>,
         options: Option<&ChatOptions>,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ChatError>>, ChatError> {
-        let prepared = request::from_core(messages, options, None, tool_declarations.is_some())
+        let tools = match tool_declarations {
+            Some(d) => Some(
+                d.json()
+                    .map_err(|e| ChatError::Provider(format!("tool declarations: {e}")))?,
+            ),
+            None => None,
+        };
+
+        let prepared = request::from_core(messages, options, None, tools.as_ref(), &*self.format)
             .map_err(|f| f.err)?;
+        let tools_present = tools.is_some();
 
         let model = self.model.clone();
         let tokenizer = self.tokenizer.clone();
+        let format = self.format.clone();
         let eos = self.eos.clone();
         let model_id = self.model_id.clone();
         let tokens_per_eval = self.tokens_per_eval;
@@ -82,25 +92,43 @@ impl StreamProvider for MlxClient {
                 },
             );
 
-            match result {
-                Ok(stats) => {
-                    for chunk in splitter.flush() {
-                        let _ = tx.send(Ok(to_event(chunk)));
-                    }
-                    let resp = response::into_core_parts(
-                        &model_id,
-                        std::mem::take(&mut splitter.reasoning),
-                        std::mem::take(&mut splitter.text),
-                        input_tokens,
-                        stats.tokens.len(),
-                        max_tokens,
-                    );
-                    let _ = tx.send(Ok(StreamEvent::Done(resp)));
-                }
+            let stats = match result {
+                Ok(s) => s,
                 Err(e) => {
                     let _ = tx.send(Err(ChatError::Provider(format!("generation failed: {e}"))));
+                    return;
                 }
+            };
+            for chunk in splitter.flush() {
+                let _ = tx.send(Ok(to_event(chunk)));
             }
+            drop(model);
+
+            let reasoning_text = std::mem::take(&mut splitter.reasoning);
+            let body = std::mem::take(&mut splitter.text);
+            let (calls, text) = if tools_present {
+                let parsed = format.parse(&body);
+                (parsed.calls, parsed.text)
+            } else {
+                (Vec::new(), body)
+            };
+
+            // Surface the parsed calls to the consumer before the terminal
+            // event; the chat loop executes them off `Done`'s content.
+            for call in &calls {
+                let _ = tx.send(Ok(StreamEvent::ToolCall(call.clone())));
+            }
+
+            let resp = response::build(
+                &model_id,
+                reasoning_text,
+                text,
+                calls,
+                input_tokens,
+                stats.tokens.len(),
+                max_tokens,
+            );
+            let _ = tx.send(Ok(StreamEvent::Done(resp)));
         });
 
         let s = async_stream::stream! {
