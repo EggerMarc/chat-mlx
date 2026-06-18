@@ -2,6 +2,7 @@
 name = "chat-mlx"
 version = "0.0.0"
 edition = "2024"
+license = "MIT"
 rust-version = "1.94"
 description = "Local-inference chat-rs provider (and CLI) for MiniCPM5 / Llama / Qwen models on Apple Silicon via MLX."
 
