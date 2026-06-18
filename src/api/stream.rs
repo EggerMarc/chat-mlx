@@ -33,8 +33,9 @@ impl StreamProvider for MlxClient {
             None => None,
         };
 
-        let prepared = request::from_core(messages, options, None, tools.as_ref(), &*self.format)
-            .map_err(|f| f.err)?;
+        let prepared =
+            request::from_core(messages, options, None, tools.as_ref(), &*self.format, &self.template)
+                .map_err(|f| f.err)?;
         let tools_present = tools.is_some();
 
         let model = self.model.clone();
@@ -194,8 +195,15 @@ impl MlxClient {
         schema: &schemars::Schema,
         mode: StructuredMode,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ChatError>>, ChatError> {
-        let prepared = request::from_core(messages, options, Some(schema), None, &*self.format)
-            .map_err(|f| f.err)?;
+        let prepared = request::from_core(
+            messages,
+            options,
+            Some(schema),
+            None,
+            &*self.format,
+            &self.template,
+        )
+        .map_err(|f| f.err)?;
 
         // Build the grammar mask up front (decoding the vocab is independent of
         // the model lock).

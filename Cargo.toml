@@ -45,6 +45,7 @@ anyhow = "1"
 
 async-stream = { version = "0.3", optional = true }
 futures = { version = "0.3", optional = true }
+minijinja = "2"
 
 [dev-dependencies]
 # Needed by the `#[tool]` / `collect_tools!` macros used in examples/tools.rs.

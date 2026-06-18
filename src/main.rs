@@ -98,7 +98,18 @@ fn main() -> Result<()> {
     let tokenizer = loaded.tokenizer;
     let eos = loaded.eos;
 
-    let prompt = template::simple(cli.system.as_deref(), &cli.prompt);
+    let mut turns = Vec::new();
+    if let Some(sys) = cli.system.as_deref() {
+        turns.push(template::Turn {
+            role: "system",
+            content: sys.to_string(),
+        });
+    }
+    turns.push(template::Turn {
+        role: "user",
+        content: cli.prompt.clone(),
+    });
+    let prompt = loaded.chat_template.render(&turns);
     let encoding = tokenizer
         .encode(prompt, true)
         .map_err(|e| anyhow::anyhow!(e))?;

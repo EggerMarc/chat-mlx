@@ -5,6 +5,7 @@ use tokenizers::Tokenizer;
 
 use crate::engine::config::ModelArgs;
 use crate::engine::model::Model;
+use crate::engine::template::ChatTemplate;
 use crate::parsers::tool::ToolFormat;
 
 /// How structured output is enforced.
@@ -37,6 +38,7 @@ pub struct MlxClient {
     pub(crate) max_context: Option<i32>,
     pub(crate) sink_tokens: i32,
     pub(crate) format: Arc<dyn ToolFormat>,
+    pub(crate) template: Arc<ChatTemplate>,
     pub(crate) structured_mode: StructuredMode,
     /// Per-token surface strings, built lazily on first constrained decode and
     /// shared across clones. Index = token id, length = model vocab.

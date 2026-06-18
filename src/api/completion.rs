@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use chat_core::error::ChatFailure;
+use chat_core::error::{ChatError, ChatFailure};
 use chat_core::traits::CompletionProvider;
 use chat_core::types::messages::Messages;
 use chat_core::types::options::ChatOptions;
@@ -37,59 +37,73 @@ impl CompletionProvider for MlxClient {
             structured_output,
             tools.as_ref(),
             &*self.format,
+            &self.template,
         )?;
 
-        let encoding = self
-            .tokenizer
-            .encode(prepared.prompt, true)
-            .map_err(|e| error::invalid(format!("tokenizer encode: {e}")))?;
-        let ids = encoding.get_ids();
-        let input_tokens = ids.len();
+        let want_structured = structured_output.is_some();
+        let tools_present = tools.is_some();
+        let constrained = want_structured && self.structured_mode == StructuredMode::Constrained;
+        // Build the JSON grammar mask up front (decoding the vocab is independent
+        // of the model lock).
+        let token_strings = constrained.then(|| self.token_strings());
 
-        // For constrained structured output, build the JSON grammar mask up
-        // front (decoding the vocab is independent of the model lock).
-        let constrained =
-            structured_output.is_some() && self.structured_mode == StructuredMode::Constrained;
-        let mut json_constraint =
-            constrained.then(|| JsonConstraint::new(self.token_strings(), self.eos.clone()));
+        // Run the synchronous, GPU-bound decode off the async runtime so the
+        // caller's executor stays free (e.g. to service a concurrent input
+        // stream). The model is held behind `Arc<Mutex<…>>`, so the mutex
+        // serialises decodes across clones while the runtime keeps moving.
+        let model = self.model.clone();
+        let tokenizer = self.tokenizer.clone();
+        let eos = self.eos.clone();
+        let sampler = prepared.sampler.clone();
+        let prompt = prepared.prompt;
+        let max_tokens = prepared.max_tokens;
+        let tokens_per_eval = self.tokens_per_eval;
+        let max_context = self.max_context;
+        let sink_tokens = self.sink_tokens;
 
-        // Lock the model for the duration of the (synchronous) decode. No await
-        // is held across the guard, so the future stays `Send`.
-        let mut model = self
-            .model
-            .lock()
-            .map_err(|_| error::provider("model mutex poisoned"))?;
-        let mut cache = model.make_cache(self.max_context, self.sink_tokens);
+        let decode = tokio::task::spawn_blocking(move || -> Result<(String, usize, usize), ChatError> {
+            let encoding = tokenizer
+                .encode(prompt, true)
+                .map_err(|e| ChatError::InvalidResponse(format!("tokenizer encode: {e}")))?;
+            let ids = encoding.get_ids();
+            let input_tokens = ids.len();
 
-        let stats = match json_constraint.as_mut() {
-            Some(con) => generate::generate_constrained(
-                &mut model,
-                ids,
-                prepared.max_tokens,
-                &prepared.sampler,
-                &self.eos,
-                &mut cache,
-                con,
-                |_| {},
-            ),
-            None => generate::generate(
-                &mut model,
-                ids,
-                prepared.max_tokens,
-                &prepared.sampler,
-                &self.eos,
-                self.tokens_per_eval,
-                &mut cache,
-                |_| {},
-            ),
-        }
-        .map_err(|e| error::provider(format!("generation failed: {e}")))?;
-        drop(model);
+            let mut model = model
+                .lock()
+                .map_err(|_| ChatError::Provider("model mutex poisoned".into()))?;
+            let mut cache = model.make_cache(max_context, sink_tokens);
 
-        let raw = self
-            .tokenizer
-            .decode(&stats.tokens, true)
-            .map_err(|e| error::invalid(format!("tokenizer decode: {e}")))?;
+            let stats = match token_strings {
+                Some(ts) => {
+                    let mut con = JsonConstraint::new(ts, eos.clone());
+                    generate::generate_constrained(
+                        &mut model, ids, max_tokens, &sampler, &eos, &mut cache, &mut con, |_| {},
+                    )
+                }
+                None => generate::generate(
+                    &mut model,
+                    ids,
+                    max_tokens,
+                    &sampler,
+                    &eos,
+                    tokens_per_eval,
+                    &mut cache,
+                    |_| {},
+                ),
+            }
+            .map_err(|e| ChatError::Provider(format!("generation failed: {e}")))?;
+            drop(model);
+
+            let raw = tokenizer
+                .decode(&stats.tokens, true)
+                .map_err(|e| ChatError::InvalidResponse(format!("tokenizer decode: {e}")))?;
+            Ok((raw, input_tokens, stats.tokens.len()))
+        });
+
+        let (raw, input_tokens, output_tokens) = decode
+            .await
+            .map_err(|e| error::provider(format!("decode task failed: {e}")))?
+            .map_err(ChatFailure::from_err)?;
 
         let (reasoning_text, body) = reasoning::split(&raw);
 
@@ -97,7 +111,7 @@ impl CompletionProvider for MlxClient {
         let mut calls = Vec::new();
         let mut text = String::new();
 
-        if structured_output.is_some() {
+        if want_structured {
             // Both modes parse the emitted JSON; constrained decoding has
             // already guaranteed it is well-formed. On a parse miss, hand back
             // the raw text so the chat loop's retry can take over.
@@ -105,7 +119,7 @@ impl CompletionProvider for MlxClient {
                 Some(v) => structured = Some(v),
                 None => text = body,
             }
-        } else if tools.is_some() {
+        } else if tools_present {
             let parsed = self.format.parse(&body);
             calls = parsed.calls;
             text = parsed.text;
@@ -120,8 +134,8 @@ impl CompletionProvider for MlxClient {
             calls,
             structured,
             input_tokens,
-            stats.tokens.len(),
-            prepared.max_tokens,
+            output_tokens,
+            max_tokens,
         ))
     }
 

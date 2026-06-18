@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::api::types::error::{invalid, unsupported};
 use crate::engine::sampler::SampleOpts;
-use crate::engine::template::{Turn, chatml};
+use crate::engine::template::{ChatTemplate, Turn};
 use crate::parsers::structured;
 use crate::parsers::tool::ToolFormat;
 
@@ -32,6 +32,7 @@ pub fn from_core(
     structured_output: Option<&schemars::Schema>,
     tools: Option<&Value>,
     format: &dyn ToolFormat,
+    template: &ChatTemplate,
 ) -> Result<Prepared, ChatFailure> {
     let instr = match structured_output {
         Some(schema) => {
@@ -82,7 +83,7 @@ pub fn from_core(
         );
     }
 
-    let prompt = chatml(&turns);
+    let prompt = template.render(&turns);
     let (sampler, max_tokens) = sampler_from_options(options);
     Ok(Prepared {
         prompt,

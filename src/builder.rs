@@ -155,6 +155,7 @@ impl MlxBuilder<WithModel> {
             max_context: self.max_context,
             sink_tokens: self.sink_tokens,
             format,
+            template: Arc::new(loaded.chat_template),
             structured_mode: self.structured_mode,
             token_strings: Arc::new(std::sync::OnceLock::new()),
             meta,

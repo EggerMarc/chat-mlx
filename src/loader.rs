@@ -11,6 +11,7 @@ use tokenizers::Tokenizer;
 
 use crate::engine::config::{GenerationConfig, HfConfig, ModelArgs};
 use crate::engine::model::Model;
+use crate::engine::template::ChatTemplate;
 
 pub struct Loaded {
     pub model: Model,
@@ -18,6 +19,7 @@ pub struct Loaded {
     pub args: ModelArgs,
     pub eos: Vec<u32>,
     pub model_type: String,
+    pub chat_template: ChatTemplate,
 }
 
 /// Runtime quantization level (MLX group-affine, group size 64). Lower bits =
@@ -79,6 +81,7 @@ pub fn load(model_id: &str, quant: Option<Quantize>) -> Result<Loaded> {
     let model_type = hf.model_type.clone();
     let args: ModelArgs = hf.into();
     let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(|e| anyhow::anyhow!(e))?;
+    let chat_template = build_chat_template(&repo);
 
     let mut model = Model::new(&args)?;
     for p in &weight_paths {
@@ -104,7 +107,41 @@ pub fn load(model_id: &str, quant: Option<Quantize>) -> Result<Loaded> {
         args,
         eos,
         model_type,
+        chat_template,
     })
+}
+
+/// Read the model's `chat_template` (+ bos/eos tokens) from
+/// `tokenizer_config.json`. Falls back to ChatML if the file or field is absent.
+fn build_chat_template(repo: &ApiRepo) -> ChatTemplate {
+    let cfg = repo
+        .get("tokenizer_config.json")
+        .ok()
+        .and_then(|p| std::fs::File::open(p).ok())
+        .and_then(|f| serde_json::from_reader::<_, serde_json::Value>(f).ok());
+
+    let Some(cfg) = cfg else {
+        return ChatTemplate::chatml_only();
+    };
+
+    let template = cfg
+        .get("chat_template")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    ChatTemplate::new(template, token_str(cfg.get("bos_token")), token_str(cfg.get("eos_token")))
+}
+
+/// HF tokens are either a bare string or `{ "content": "…" }`.
+fn token_str(v: Option<&serde_json::Value>) -> String {
+    match v {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Object(o)) => o
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    }
 }
 
 pub fn resolve_weights(repo: &ApiRepo) -> Result<Vec<PathBuf>> {
