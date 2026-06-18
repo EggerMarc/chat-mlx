@@ -13,6 +13,7 @@ use crate::api::types::{request, response};
 use crate::client::MlxClient;
 use crate::engine::generate;
 use crate::parsers::reasoning::{Chunk, ReasoningSplitter};
+use crate::parsers::tool::ToolCallStripper;
 
 #[async_trait]
 impl StreamProvider for MlxClient {
@@ -74,6 +75,34 @@ impl StreamProvider for MlxClient {
             let mut cache = model.make_cache(max_context, sink_tokens);
             let mut decoder = tokenizer.decode_stream(true);
             let mut splitter = ReasoningSplitter::new();
+            // While tools are active, hide in-progress `<tool_call>` markup from
+            // the live text; the calls still surface as `Tool` parts at `Done`.
+            let mut stripper = if tools_present {
+                format
+                    .call_delimiters()
+                    .map(|(o, c)| ToolCallStripper::new(o, c))
+            } else {
+                None
+            };
+
+            let route = |chunk: Chunk,
+                         stripper: &mut Option<ToolCallStripper>,
+                         tx: &mpsc::UnboundedSender<Result<StreamEvent, ChatError>>| {
+                match chunk {
+                    Chunk::Reasoning(s) => {
+                        let _ = tx.send(Ok(StreamEvent::ReasoningChunk(s)));
+                    }
+                    Chunk::Text(s) => {
+                        let shown = match stripper.as_mut() {
+                            Some(st) => st.push(&s),
+                            None => s,
+                        };
+                        if !shown.is_empty() {
+                            let _ = tx.send(Ok(StreamEvent::TextChunk(shown)));
+                        }
+                    }
+                }
+            };
 
             let result = generate::generate(
                 &mut model,
@@ -86,7 +115,7 @@ impl StreamProvider for MlxClient {
                 |id| {
                     if let Ok(Some(piece)) = decoder.step(id) {
                         for chunk in splitter.push(&piece) {
-                            let _ = tx.send(Ok(to_event(chunk)));
+                            route(chunk, &mut stripper, &tx);
                         }
                     }
                 },
@@ -100,7 +129,13 @@ impl StreamProvider for MlxClient {
                 }
             };
             for chunk in splitter.flush() {
-                let _ = tx.send(Ok(to_event(chunk)));
+                route(chunk, &mut stripper, &tx);
+            }
+            if let Some(st) = stripper.as_mut() {
+                let tail = st.flush();
+                if !tail.is_empty() {
+                    let _ = tx.send(Ok(StreamEvent::TextChunk(tail)));
+                }
             }
             drop(model);
 
@@ -137,12 +172,5 @@ impl StreamProvider for MlxClient {
             }
         };
         Ok(s.boxed())
-    }
-}
-
-fn to_event(chunk: Chunk) -> StreamEvent {
-    match chunk {
-        Chunk::Text(s) => StreamEvent::TextChunk(s),
-        Chunk::Reasoning(s) => StreamEvent::ReasoningChunk(s),
     }
 }

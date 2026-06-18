@@ -1,14 +1,13 @@
-//! Interactive, streaming chat REPL driving `MlxClient` through chat-core.
+//! Interactive, streaming chat REPL over the chat-mlx provider — the one
+//! example that exercises everything: CLI-composed session config, multi-turn
+//! history, live streaming, gray-rendered `<think>` reasoning, and tool calling.
 //!
-//! Compose the session on the command line, then talk to it:
 //!   cargo run --release --example chat -- \
 //!     --model Qwen/Qwen3-0.6B --system "You are a pirate." --temp 0.7 --top-k 40
 //!
-//! Streaming is on by default; disable with `--no-default-features`.
-//!
-//! Output streams live. Reasoning (`<think>…</think>`) is rendered in gray and
-//! the tags are stripped. `/quit` (or Ctrl-D) exits. Conversation history is
-//! kept across turns.
+//! A demo `get_weather` tool is always registered; ask about the weather to see
+//! the tool round-trip. Type a message and press enter; `/quit` (or Ctrl-D)
+//! exits. Streaming is on by default (disable with `--no-default-features`).
 
 use std::io::{self, BufRead, Write};
 
@@ -19,11 +18,20 @@ use chat_core::types::options::ChatOptions;
 use chat_core::types::response::StreamEvent;
 use clap::Parser;
 use futures::StreamExt;
+use tools_rs::{collect_tools, tool};
 
 use chat_mlx::MlxBuilder;
 
 const GRAY: &str = "\x1b[90m";
+const CYAN: &str = "\x1b[36m";
+const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
+
+/// Look up the current weather for a city.
+#[tool]
+async fn get_weather(city: String) -> String {
+    format!("It is 22°C and sunny in {city}.")
+}
 
 #[derive(Parser)]
 #[command(about = "Interactive streaming chat REPL over the chat-mlx provider")]
@@ -85,6 +93,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut chat = ChatBuilder::new()
         .with_model(client)
         .with_options(options)
+        .with_tools(collect_tools())
+        .with_max_steps(6)
         .build();
 
     let mut msgs = messages::Messages::default();
@@ -101,7 +111,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         cli.max_tokens,
         if cli.quantize { " quantized" } else { "" },
     );
-    eprintln!("[chat] reasoning shown in gray; type a message, /quit or Ctrl-D to exit.\n");
+    eprintln!(
+        "[chat] tool: get_weather(city). reasoning in gray. /quit or Ctrl-D to exit.\n"
+    );
 
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
@@ -129,13 +141,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut stream = chat.stream(&mut msgs).await?;
         while let Some(ev) = stream.next().await {
             match ev {
-                Ok(StreamEvent::ReasoningChunk(s)) => {
-                    print!("{GRAY}{s}{RESET}");
-                    io::stdout().flush()?;
+                Ok(StreamEvent::ReasoningChunk(s)) => print_flush(&format!("{GRAY}{s}{RESET}"))?,
+                Ok(StreamEvent::TextChunk(s)) => print_flush(&s)?,
+                Ok(StreamEvent::ToolCall(call)) => {
+                    print_flush(&format!("\n{CYAN}⚙ {}({}){RESET}\n", call.name, call.arguments))?
                 }
-                Ok(StreamEvent::TextChunk(s)) => {
-                    print!("{s}");
-                    io::stdout().flush()?;
+                Ok(StreamEvent::ToolResult(resp)) => {
+                    print_flush(&format!("{DIM}⮑ {}{RESET}\n", resp.result))?
                 }
                 Ok(StreamEvent::Done(_)) => break,
                 Ok(_) => {}
@@ -150,4 +162,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     eprintln!("\n[chat] bye.");
     Ok(())
+}
+
+fn print_flush(s: &str) -> io::Result<()> {
+    print!("{s}");
+    io::stdout().flush()
 }

@@ -18,6 +18,10 @@ pub struct HfConfig {
     pub head_dim: Option<i32>,
     #[serde(default)]
     pub tie_word_embeddings: bool,
+    /// Llama-style flag enabling bias on all attention projections. Absent on
+    /// Qwen2 (which uses QKV bias unconditionally) and Qwen3 (no bias).
+    #[serde(default)]
+    pub attention_bias: Option<bool>,
 }
 
 fn default_rms_eps() -> f32 {
@@ -40,11 +44,24 @@ pub struct ModelArgs {
     pub rope_theta: f32,
     pub tie_word_embeddings: bool,
     pub use_qk_norm: bool,
+    /// Bias on the Q/K/V projections (Qwen2 family).
+    pub attn_qkv_bias: bool,
+    /// Bias on the attention output projection.
+    pub attn_o_bias: bool,
 }
 
 impl From<HfConfig> for ModelArgs {
     fn from(c: HfConfig) -> Self {
         let head_dim = c.head_dim.unwrap_or(c.hidden_size / c.num_attention_heads);
+        // Qwen2 uses QKV bias unconditionally (output projection unbiased);
+        // everyone else follows the Llama-style `attention_bias` flag uniformly.
+        let is_qwen2 = c.model_type == "qwen2" || c.model_type == "qwen2_moe";
+        let bias = c.attention_bias.unwrap_or(false);
+        let (attn_qkv_bias, attn_o_bias) = if is_qwen2 {
+            (true, false)
+        } else {
+            (bias, bias)
+        };
         Self {
             dim: c.hidden_size,
             n_layers: c.num_hidden_layers,
@@ -57,6 +74,8 @@ impl From<HfConfig> for ModelArgs {
             rope_theta: c.rope_theta,
             tie_word_embeddings: c.tie_word_embeddings,
             use_qk_norm: c.model_type == "qwen3",
+            attn_qkv_bias,
+            attn_o_bias,
         }
     }
 }

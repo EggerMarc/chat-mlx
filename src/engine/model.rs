@@ -47,16 +47,16 @@ impl Attention {
         let kv_dim = args.n_kv_heads * args.head_dim;
 
         let q_proj = nn::LinearBuilder::new(args.dim, q_dim)
-            .bias(false)
+            .bias(args.attn_qkv_bias)
             .build()?;
         let k_proj = nn::LinearBuilder::new(args.dim, kv_dim)
-            .bias(false)
+            .bias(args.attn_qkv_bias)
             .build()?;
         let v_proj = nn::LinearBuilder::new(args.dim, kv_dim)
-            .bias(false)
+            .bias(args.attn_qkv_bias)
             .build()?;
         let o_proj = nn::LinearBuilder::new(q_dim, args.dim)
-            .bias(false)
+            .bias(args.attn_o_bias)
             .build()?;
 
         let rope = nn::RopeBuilder::new(args.head_dim)
@@ -247,6 +247,19 @@ impl Model {
             },
             lm_head: MaybeQuantized::new(lm_head),
         })
+    }
+
+    /// Tie the output projection to the input embeddings (shared weights), for
+    /// models that ship no `lm_head.weight`. Call after loading and before any
+    /// quantization; a no-op once either side is quantized.
+    pub fn tie_lm_head(&mut self) {
+        let weight = match &self.model.embed_tokens {
+            MaybeQuantized::Original(e) => e.weight.as_ref().clone(),
+            MaybeQuantized::Quantized(_) => return,
+        };
+        if let MaybeQuantized::Original(lm) = &mut self.lm_head {
+            *lm.weight = weight;
+        }
     }
 
     pub fn make_cache(&self, max_size: Option<i32>, keep: i32) -> Vec<KvCache> {

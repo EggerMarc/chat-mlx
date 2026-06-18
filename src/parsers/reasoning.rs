@@ -55,7 +55,7 @@ impl ReasoningSplitter {
 
             // No complete marker. Emit everything except a suffix that could be
             // the start of one.
-            let keep = partial_suffix_len(&self.pending, marker);
+            let keep = super::partial_suffix_len(&self.pending, marker);
             let emit_len = self.pending.len() - keep;
             if emit_len > 0 {
                 let s: String = self.pending.drain(..emit_len).collect();
@@ -85,19 +85,6 @@ impl ReasoningSplitter {
             Chunk::Text(s)
         }
     }
-}
-
-/// Length of the longest suffix of `s` that is a proper prefix of `marker`.
-/// Lets us hold back a partial tag split across chunk boundaries.
-fn partial_suffix_len(s: &str, marker: &str) -> usize {
-    let max = marker.len().min(s.len());
-    for k in (1..max).rev() {
-        let start = s.len() - k;
-        if s.is_char_boundary(start) && marker.as_bytes().starts_with(&s.as_bytes()[start..]) {
-            return k;
-        }
-    }
-    0
 }
 
 /// One-shot split of a complete string into `(reasoning, answer)`.

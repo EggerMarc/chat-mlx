@@ -47,6 +47,13 @@ pub fn load(model_id: &str, quantize: bool) -> Result<Loaded> {
             .context("load_safetensors (struct field names must match HF tensor keys)")?;
     }
 
+    // Models with tied embeddings (e.g. Qwen2.5) ship no `lm_head.weight`;
+    // share the input embeddings into the output projection. Must precede
+    // quantization.
+    if args.tie_word_embeddings {
+        model.tie_lm_head();
+    }
+
     if quantize {
         model = mlx_rs::nn::quantize(model, Some(64), Some(4))?;
     }

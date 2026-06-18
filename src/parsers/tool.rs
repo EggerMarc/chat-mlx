@@ -14,6 +14,12 @@ pub trait ToolFormat: Send + Sync {
     fn render_call(&self, call: &FunctionCall) -> String;
     fn render_result(&self, resp: &FunctionResponse) -> (&'static str, String);
     fn parse(&self, text: &str) -> ParsedTools;
+
+    /// The `(open, close)` markers wrapping a call, if delimiter-based. Used to
+    /// hide in-progress call markup while streaming.
+    fn call_delimiters(&self) -> Option<(String, String)> {
+        None
+    }
 }
 
 pub fn detect(model_type: &str) -> Arc<dyn ToolFormat> {
@@ -117,6 +123,10 @@ impl ToolFormat for Hermes {
             text: residual.trim().to_string(),
         }
     }
+
+    fn call_delimiters(&self) -> Option<(String, String)> {
+        Some((TOOL_CALL_OPEN.to_string(), TOOL_CALL_CLOSE.to_string()))
+    }
 }
 
 pub struct Pattern {
@@ -155,5 +165,113 @@ impl ToolFormat for Pattern {
             calls,
             text: residual.trim().to_string(),
         }
+    }
+
+    fn call_delimiters(&self) -> Option<(String, String)> {
+        Some((self.open.clone(), self.close.clone()))
+    }
+}
+
+/// Incrementally drops `open … close` spans from a streamed text so in-progress
+/// tool-call markup isn't shown live. The full text is still parsed for calls
+/// separately (off the reasoning splitter's accumulation).
+pub struct ToolCallStripper {
+    open: String,
+    close: String,
+    inside: bool,
+    pending: String,
+}
+
+impl ToolCallStripper {
+    pub fn new(open: String, close: String) -> Self {
+        Self {
+            open,
+            close,
+            inside: false,
+            pending: String::new(),
+        }
+    }
+
+    /// Feed a text piece; returns the portion safe to display now.
+    pub fn push(&mut self, piece: &str) -> String {
+        self.pending.push_str(piece);
+        let mut out = String::new();
+        loop {
+            if !self.inside {
+                if let Some(i) = self.pending.find(&self.open) {
+                    out.push_str(&self.pending[..i]);
+                    self.pending.drain(..i + self.open.len());
+                    self.inside = true;
+                    continue;
+                }
+                let keep = super::partial_suffix_len(&self.pending, &self.open);
+                let n = self.pending.len() - keep;
+                let emit: String = self.pending.drain(..n).collect();
+                out.push_str(&emit);
+                break;
+            }
+            if let Some(i) = self.pending.find(&self.close) {
+                self.pending.drain(..i + self.close.len());
+                self.inside = false;
+                continue;
+            }
+            // Still inside a call: discard all but a possible partial close.
+            let keep = super::partial_suffix_len(&self.pending, &self.close);
+            let n = self.pending.len() - keep;
+            self.pending.drain(..n);
+            break;
+        }
+        out
+    }
+
+    /// Flush trailing displayable text (anything outside an unterminated call).
+    pub fn flush(&mut self) -> String {
+        if self.inside {
+            self.pending.clear();
+            return String::new();
+        }
+        std::mem::take(&mut self.pending)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hermes_parses_call_and_residual() {
+        let out = Hermes.parse(
+            "Sure.<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>",
+        );
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(out.calls[0].name, "get_weather");
+        assert_eq!(out.calls[0].arguments["city"], "Paris");
+        assert_eq!(out.text, "Sure.");
+    }
+
+    /// Feed the text one byte at a time: the tool-call span must be fully
+    /// suppressed even though the delimiters are split across pushes.
+    #[test]
+    fn stripper_hides_call_across_boundaries() {
+        let (open, close) = Hermes.call_delimiters().unwrap();
+        let mut st = ToolCallStripper::new(open, close);
+        let input = "Hi <tool_call>{\"name\":\"f\",\"arguments\":{}}</tool_call> done";
+        let mut shown = String::new();
+        for ch in input.chars() {
+            shown.push_str(&st.push(&ch.to_string()));
+        }
+        shown.push_str(&st.flush());
+        assert_eq!(shown, "Hi  done");
+    }
+
+    #[test]
+    fn pattern_strips_custom_delimiters() {
+        let p = Pattern {
+            open: "[[".into(),
+            close: "]]".into(),
+        };
+        let out = p.parse("a[[{\"name\":\"f\",\"arguments\":{}}]]b");
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(out.text, "ab");
     }
 }
