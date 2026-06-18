@@ -13,7 +13,6 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use hf_hub::{Repo, RepoType, api::sync::Api, api::sync::ApiRepo};
 use mlx_rs::module::ModuleParametersExt;
-use rand::{SeedableRng, rngs::StdRng};
 use tokenizers::Tokenizer;
 
 use crate::{
@@ -128,7 +127,6 @@ fn main() -> Result<()> {
         top_k: cli.top_k,
         top_p: cli.top_p,
     };
-    let mut rng = StdRng::seed_from_u64(cli.seed);
     let mut stream = tokenizer.decode_stream(true);
 
     let max_context = (cli.max_context > 0).then_some(cli.max_context);
@@ -145,7 +143,6 @@ fn main() -> Result<()> {
         ids,
         cli.max_tokens,
         &opts,
-        &mut rng,
         &eos,
         cli.tokens_per_eval,
         &mut kv_cache,

@@ -1,6 +1,13 @@
 use anyhow::Result;
-use mlx_rs::{Array, Dtype, ops::indexing::argmax_axis, transforms::eval};
-use rand::{Rng, rngs::StdRng};
+use mlx_rs::{
+    Array,
+    ops::{
+        argpartition_axis, argsort_axis, cumsum,
+        indexing::{IndexOp, NewAxis, argmax_axis, put_along_axis, take_along_axis},
+        softmax_axis, which,
+    },
+    random,
+};
 
 #[derive(Debug, Clone)]
 pub struct SampleOpts {
@@ -9,67 +16,51 @@ pub struct SampleOpts {
     pub top_p: Option<f32>,
 }
 
-pub fn sample(logits: &Array, opts: &SampleOpts, rng: &mut StdRng) -> Result<Array> {
+pub fn sample(logits: &Array, opts: &SampleOpts) -> Result<Array> {
     if opts.temp == 0.0 {
         return Ok(argmax_axis(logits, -1, None)?);
     }
 
-    let flat = logits.as_dtype(Dtype::Float32)?.reshape(&[-1])?;
-    eval([&flat])?;
-    let logits_host = flat.as_slice::<f32>();
+    let scaled = logits.multiply(Array::from_f32(1.0 / opts.temp))?;
+    let shape = scaled.shape();
+    let vocab = shape[shape.len() - 1];
 
-    let id = sample_host(logits_host, opts, rng);
-    Ok(Array::from(&[id][..]))
+    let filtered = match opts.top_k {
+        Some(k) if (k as i32) >= 1 && (k as i32) < vocab => apply_top_k(&scaled, k as i32)?,
+        _ => scaled,
+    };
+
+    match opts.top_p {
+        Some(p) if p > 0.0 && p < 1.0 => sample_top_p(&filtered, p),
+        _ => Ok(random::categorical(&filtered, None, None, None)?),
+    }
 }
 
-fn sample_host(logits: &[f32], opts: &SampleOpts, rng: &mut StdRng) -> u32 {
-    let inv_temp = 1.0 / opts.temp;
+fn apply_top_k(logits: &Array, k: i32) -> Result<Array> {
+    let vocab = {
+        let shape = logits.shape();
+        shape[shape.len() - 1]
+    };
+    let order = argpartition_axis(logits.multiply(Array::from_f32(-1.0))?, k - 1, -1)?;
+    let drop = order.index((.., k..vocab));
+    Ok(put_along_axis(
+        logits,
+        &drop,
+        Array::from_f32(f32::NEG_INFINITY),
+        -1,
+    )?)
+}
 
-    let mut idx: Vec<usize> = (0..logits.len()).collect();
-    idx.sort_unstable_by(|&a, &b| {
-        logits[b]
-            .partial_cmp(&logits[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+fn sample_top_p(logits: &Array, p: f32) -> Result<Array> {
+    let probs = softmax_axis(logits, -1, None)?;
+    let order = argsort_axis(&probs, -1)?;
+    let sorted = take_along_axis(&probs, &order, -1)?;
+    let cumulative = cumsum(&sorted, -1, false, true)?;
 
-    let k = opts.top_k.unwrap_or(idx.len()).clamp(1, idx.len());
-    idx.truncate(k);
+    let keep = cumulative.gt(Array::from_f32(1.0 - p))?;
+    let kept = which(&keep, &sorted, Array::from_f32(0.0))?;
 
-    let max_logit = logits[idx[0]];
-    let mut probs: Vec<f32> = idx
-        .iter()
-        .map(|&i| ((logits[i] - max_logit) * inv_temp).exp())
-        .collect();
-    let sum: f32 = probs.iter().sum();
-    for p in &mut probs {
-        *p /= sum;
-    }
-
-    if let Some(top_p) = opts.top_p {
-        let mut cum = 0.0;
-        let mut cutoff = probs.len();
-        for (j, &p) in probs.iter().enumerate() {
-            cum += p;
-            if cum >= top_p {
-                cutoff = j + 1;
-                break;
-            }
-        }
-        idx.truncate(cutoff);
-        probs.truncate(cutoff);
-        let s: f32 = probs.iter().sum();
-        for p in &mut probs {
-            *p /= s;
-        }
-    }
-
-    let r: f32 = rng.r#gen::<f32>();
-    let mut acc = 0.0;
-    for (j, &p) in probs.iter().enumerate() {
-        acc += p;
-        if r <= acc {
-            return idx[j] as u32;
-        }
-    }
-    idx[idx.len() - 1] as u32
+    let choice = random::categorical(&kept.log()?, None, None, None)?;
+    let token = take_along_axis(&order, &choice.index((.., NewAxis)), -1)?;
+    Ok(token.squeeze_axes(&[1])?)
 }
