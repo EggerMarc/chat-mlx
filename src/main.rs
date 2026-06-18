@@ -1,3 +1,4 @@
+mod cache;
 mod config;
 mod generate;
 mod model;
@@ -55,6 +56,14 @@ struct Cli {
 
     #[clap(long, default_value = "8")]
     tokens_per_eval: usize,
+
+    /// Max tokens retained in the KV cache (rotating window). 0 = unbounded.
+    #[clap(long, default_value = "4096")]
+    max_context: i32,
+
+    /// Leading tokens pinned as attention sinks when the window rotates.
+    #[clap(long, default_value = "4")]
+    sink_tokens: i32,
 
     /// Runtime-quantize the loaded fp weights to 4-bit (group size 64).
     #[clap(long)]
@@ -122,6 +131,15 @@ fn main() -> Result<()> {
     let mut rng = StdRng::seed_from_u64(cli.seed);
     let mut stream = tokenizer.decode_stream(true);
 
+    let max_context = (cli.max_context > 0).then_some(cli.max_context);
+    if let Some(n) = max_context {
+        eprintln!(
+            "[info] rotating KV cache: window={} sink={}",
+            n, cli.sink_tokens
+        );
+    }
+    let mut kv_cache = m.make_cache(max_context, cli.sink_tokens);
+
     let stats = generate::generate(
         &mut m,
         ids,
@@ -130,6 +148,7 @@ fn main() -> Result<()> {
         &mut rng,
         &eos,
         cli.tokens_per_eval,
+        &mut kv_cache,
         |id| {
             if let Ok(Some(s)) = stream.step(id) {
                 print!("{s}");

@@ -6,20 +6,23 @@ use mlx_rs::{
     macros::{ModuleParameters, Quantizable},
     module::Module,
     nn,
-    ops::concatenate_axis,
     quantization::MaybeQuantized,
 };
 
+use crate::cache::KvCache;
 use crate::config::ModelArgs;
-
-pub type LayerCache = Option<(Array, Array)>;
-pub type Cache = Vec<LayerCache>;
 
 #[derive(Debug, Clone, ModuleParameters, Quantizable)]
 pub struct Attention {
     n_heads: i32,
     n_kv_heads: i32,
     scale: f32,
+    use_qk_norm: bool,
+
+    #[param]
+    q_norm: nn::RmsNorm,
+    #[param]
+    k_norm: nn::RmsNorm,
 
     #[quantizable]
     #[param]
@@ -65,6 +68,13 @@ impl Attention {
             n_heads: args.n_heads,
             n_kv_heads: args.n_kv_heads,
             scale: (args.head_dim as f32).powf(-0.5),
+            use_qk_norm: args.use_qk_norm,
+            q_norm: nn::RmsNormBuilder::new(args.head_dim)
+                .eps(args.norm_eps)
+                .build()?,
+            k_norm: nn::RmsNormBuilder::new(args.head_dim)
+                .eps(args.norm_eps)
+                .build()?,
             q_proj: MaybeQuantized::new(q_proj),
             k_proj: MaybeQuantized::new(k_proj),
             v_proj: MaybeQuantized::new(v_proj),
@@ -78,8 +88,8 @@ impl Attention {
         &mut self,
         x: &Array,
         mask: Option<&Array>,
-        cache: Option<&(Array, Array)>,
-    ) -> Result<(Array, (Array, Array)), Exception> {
+        cache: &mut KvCache,
+    ) -> Result<Array, Exception> {
         let B = x.shape()[0];
         let L = x.shape()[1];
 
@@ -87,7 +97,6 @@ impl Attention {
         let mut k = self.k_proj.forward(x)?;
         let mut v = self.v_proj.forward(x)?;
 
-        // [B, L, n_heads, head_dim] -> [B, n_heads, L, head_dim]
         q = q
             .reshape(&[B, L, self.n_heads, -1])?
             .transpose_axes(&[0, 2, 1, 3])?;
@@ -98,25 +107,19 @@ impl Attention {
             .reshape(&[B, L, self.n_kv_heads, -1])?
             .transpose_axes(&[0, 2, 1, 3])?;
 
-        match cache {
-            Some((kc, vc)) => {
-                let offset = kc.shape()[2];
-                q = self.rope.forward((&q, offset))?;
-                k = self.rope.forward((&k, offset))?;
-                k = concatenate_axis(&[kc, &k], 2)?;
-                v = concatenate_axis(&[vc, &v], 2)?;
-            }
-            None => {
-                q = self.rope.forward(&q)?;
-                k = self.rope.forward(&k)?;
-            }
+        if self.use_qk_norm {
+            q = self.q_norm.forward(&q)?;
+            k = self.k_norm.forward(&k)?;
         }
+
+        let offset = cache.offset();
+        q = self.rope.forward((&q, offset))?;
+        k = self.rope.forward((&k, offset))?;
+        let (k, v) = cache.update_and_fetch(&k, &v)?;
 
         let out = scaled_dot_product_attention(q, &k, &v, self.scale, mask.map(Into::into))?;
         let out = out.transpose_axes(&[0, 2, 1, 3])?.reshape(&[B, L, -1])?;
-        let out = self.o_proj.forward(&out)?;
-
-        Ok((out, (k, v)))
+        self.o_proj.forward(&out)
     }
 }
 
@@ -189,16 +192,15 @@ impl DecoderLayer {
         &mut self,
         x: &Array,
         mask: Option<&Array>,
-        cache: Option<&(Array, Array)>,
-    ) -> Result<(Array, (Array, Array)), Exception> {
+        cache: &mut KvCache,
+    ) -> Result<Array, Exception> {
         let normed = self.input_layernorm.forward(x)?;
-        let (attn, kv) = self.self_attn.forward(&normed, mask, cache)?;
+        let attn = self.self_attn.forward(&normed, mask, cache)?;
         let h = x.add(attn)?;
         let ff = self
             .mlp
             .forward(&self.post_attention_layernorm.forward(&h)?)?;
-        let out = h.add(ff)?;
-        Ok((out, kv))
+        h.add(ff)
     }
 }
 
@@ -247,7 +249,13 @@ impl Model {
         })
     }
 
-    pub fn forward(&mut self, tokens: &Array, cache: &Cache) -> Result<(Array, Cache), Exception> {
+    pub fn make_cache(&self, max_size: Option<i32>, keep: i32) -> Vec<KvCache> {
+        (0..self.model.layers.len())
+            .map(|_| KvCache::new(256, max_size, keep))
+            .collect()
+    }
+
+    pub fn forward(&mut self, tokens: &Array, cache: &mut [KvCache]) -> Result<Array, Exception> {
         let mut h = self.model.embed_tokens.forward(tokens)?;
 
         let mask = if h.shape()[1] > 1 {
@@ -257,16 +265,11 @@ impl Model {
             None
         };
 
-        let mut new_cache = Vec::with_capacity(self.model.layers.len());
-        for (i, layer) in self.model.layers.iter_mut().enumerate() {
-            let entry = cache.get(i).and_then(Option::as_ref);
-            let (out, kv) = layer.forward(&h, mask.as_ref(), entry)?;
-            h = out;
-            new_cache.push(Some(kv));
+        for (layer, layer_cache) in self.model.layers.iter_mut().zip(cache.iter_mut()) {
+            h = layer.forward(&h, mask.as_ref(), layer_cache)?;
         }
 
         let h = self.model.norm.forward(&h)?;
-        let logits = self.lm_head.forward(&h)?;
-        Ok((logits, new_cache))
+        self.lm_head.forward(&h)
     }
 }

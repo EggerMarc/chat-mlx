@@ -9,6 +9,7 @@ use mlx_rs::{
 use rand::rngs::StdRng;
 
 use crate::{
+    cache::KvCache,
     model::Model,
     sampler::{SampleOpts, sample},
 };
@@ -27,14 +28,14 @@ pub fn generate<F: FnMut(u32)>(
     rng: &mut StdRng,
     eos: &[u32],
     tokens_per_eval: usize,
+    cache: &mut [KvCache],
     mut on_token: F,
 ) -> Result<GenStats> {
     let host_sampling = opts.top_k.is_some() || opts.top_p.is_some();
     let prompt = Array::from(prompt_ids).index(NewAxis);
 
     let t_prefill = Instant::now();
-    let empty: Vec<Option<(Array, Array)>> = Vec::new();
-    let (logits, mut cache) = model.forward(&prompt, &empty)?;
+    let logits = model.forward(&prompt, cache)?;
     let last = logits.index((.., -1, ..));
     let mut y = sample(&last, opts, rng)?;
     eval([&y])?;
@@ -53,8 +54,7 @@ pub fn generate<F: FnMut(u32)>(
             out.push(id);
 
             let next = y.index((.., NewAxis));
-            let (logits, new_cache) = model.forward(&next, &cache)?;
-            cache = new_cache;
+            let logits = model.forward(&next, cache)?;
             let logits = logits.squeeze_axes(&[1])?;
             y = sample(&logits, opts, rng)?;
             eval([&y])?;
@@ -72,8 +72,7 @@ pub fn generate<F: FnMut(u32)>(
             let mut batch: Vec<Array> = Vec::with_capacity(batch_size);
             while batch.len() < batch_size && (out.len() + batch.len()) < max_tokens {
                 let next = y.index((.., NewAxis));
-                let (logits, new_cache) = model.forward(&next, &cache)?;
-                cache = new_cache;
+                let logits = model.forward(&next, cache)?;
                 let logits = logits.squeeze_axes(&[1])?;
                 y = sample(&logits, opts, rng)?;
                 batch.push(y.clone());

@@ -2,6 +2,8 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HfConfig {
+    #[serde(default)]
+    pub model_type: String,
     pub hidden_size: i32,
     pub num_hidden_layers: i32,
     pub num_attention_heads: i32,
@@ -37,6 +39,7 @@ pub struct ModelArgs {
     pub norm_eps: f32,
     pub rope_theta: f32,
     pub tie_word_embeddings: bool,
+    pub use_qk_norm: bool,
 }
 
 impl From<HfConfig> for ModelArgs {
@@ -53,6 +56,7 @@ impl From<HfConfig> for ModelArgs {
             norm_eps: c.rms_norm_eps,
             rope_theta: c.rope_theta,
             tie_word_embeddings: c.tie_word_embeddings,
+            use_qk_norm: c.model_type == "qwen3",
         }
     }
 }

@@ -30,9 +30,18 @@ cargo run --release -- --prompt "Explain RoPE in one sentence."
 # options: --system, --max-tokens, --temp, --model, --quantize
 ```
 
+```bash
+cargo run --release -- --model Qwen/Qwen3-0.6B --prompt "Explain RoPE in one sentence."
+```
+
 Default model: `openbmb/MiniCPM5-1B` (bf16). The 4-bit `openbmb/MiniCPM5-1B-MLX`
 needs pre-quantized loading (TODO); for now load bf16 and pass `--quantize` to
 quantize at runtime.
+
+Supported families (one config-knob model, no per-family files yet):
+`llama` / `minicpm` and `qwen3`. Qwen3 adds per-head QK-Norm, gated on
+`model_type == "qwen3"`; everything else (GQA, SwiGLU, RoPE, head_dim,
+rope_theta, EOS) comes from `config.json` / `generation_config.json`.
 
 ## Perf (MiniCPM5-1B, M-series, decode tok/s)
 
@@ -55,6 +64,7 @@ method (greedy / temp / top-p) does not affect throughput.
 - [x] top-p / top-k / temperature sampling (host-side, seeded)
 - [x] live streaming output (decode_stream)
 - [x] tokens/sec timing (prefill vs decode)
+- [x] second model family: Qwen3-0.6B (QK-Norm via config knob)
 - [ ] load pre-quantized `*-MLX` safetensors directly
 - [ ] release-build perf pass (top-k via select_nth_unstable; on-device sampler)
 - [ ] a custom fused Metal kernel experiment
