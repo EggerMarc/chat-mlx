@@ -5,9 +5,10 @@ use chat_core::types::messages::parts::PartEnum;
 use chat_core::types::options::ChatOptions;
 use serde_json::Value;
 
-use crate::api::types::error::unsupported;
+use crate::api::types::error::{invalid, unsupported};
 use crate::engine::sampler::SampleOpts;
 use crate::engine::template::{Turn, chatml};
+use crate::parsers::structured;
 use crate::parsers::tool::ToolFormat;
 
 const DEFAULT_MAX_TOKENS: usize = 512;
@@ -22,7 +23,9 @@ pub struct Prepared {
 /// Lower chat-core `Messages` + `ChatOptions` into a prompt string and sampling
 /// config. When `tools` is `Some`, the declarations are advertised in the
 /// system prompt and prior `Tool` parts (calls + results) are rendered back
-/// using `format`. Structured output is still rejected (Phase 3).
+/// using `format`. When `structured_output` is `Some`, its schema is appended
+/// to the system prompt as an instruction (both structured modes do this; the
+/// constrained mode additionally masks logits during decoding).
 pub fn from_core(
     messages: &Messages,
     options: Option<&ChatOptions>,
@@ -30,9 +33,15 @@ pub fn from_core(
     tools: Option<&Value>,
     format: &dyn ToolFormat,
 ) -> Result<Prepared, ChatFailure> {
-    if structured_output.is_some() {
-        return Err(unsupported("structured outputs"));
-    }
+    let instr = match structured_output {
+        Some(schema) => {
+            let value = serde_json::to_value(schema)
+                .map_err(|e| invalid(format!("structured-output schema: {e}")))?;
+            Some(structured::instruction(&value))
+        }
+        None => None,
+    };
+    let has_system_extras = tools.is_some() || instr.is_some();
 
     let mut turns: Vec<Turn> = Vec::new();
     let mut injected = false;
@@ -41,17 +50,11 @@ pub fn from_core(
         match content.role {
             RoleEnum::System => {
                 let base = flatten_text(&content.parts.0);
-                let body = match tools {
-                    Some(t) => {
-                        injected = true;
-                        format.system_with_tools(&base, t)
-                    }
-                    None => base,
-                };
                 turns.push(Turn {
                     role: "system",
-                    content: body,
+                    content: compose_system(&base, tools, instr.as_deref(), format),
                 });
+                injected = has_system_extras;
             }
             RoleEnum::User => turns.push(Turn {
                 role: "user",
@@ -68,15 +71,13 @@ pub fn from_core(
         }
     }
 
-    // Tools present but no system message to host them: prepend one.
-    if let Some(t) = tools
-        && !injected
-    {
+    // Extras to advertise but no system message to host them: prepend one.
+    if has_system_extras && !injected {
         turns.insert(
             0,
             Turn {
                 role: "system",
-                content: format.system_with_tools("", t),
+                content: compose_system("", tools, instr.as_deref(), format),
             },
         );
     }
@@ -88,6 +89,27 @@ pub fn from_core(
         sampler,
         max_tokens,
     })
+}
+
+/// Build a system message body from base text + optional tool advert + optional
+/// structured-output instruction.
+fn compose_system(
+    base: &str,
+    tools: Option<&Value>,
+    instr: Option<&str>,
+    format: &dyn ToolFormat,
+) -> String {
+    let mut body = match tools {
+        Some(t) => format.system_with_tools(base, t),
+        None => base.to_string(),
+    };
+    if let Some(i) = instr {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(i);
+    }
+    body
 }
 
 fn flatten_text(parts: &[PartEnum]) -> String {

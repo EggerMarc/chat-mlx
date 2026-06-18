@@ -5,19 +5,23 @@ use chat_core::types::messages::text::Text;
 use chat_core::types::metadata::Metadata;
 use chat_core::types::metadata::usage::Usage;
 use chat_core::types::response::ChatResponse;
+use serde_json::Value;
 use tools_rs::FunctionCall;
 
 /// Assemble a [`ChatResponse`] from the split-out pieces of one generation.
 /// Used by both the completion and streaming paths so they stay equivalent.
 ///
-/// Part order is reasoning → text → tool calls. When there are tool calls the
-/// finish reason is `ToolCall`, which is what drives the chat loop to execute
-/// them and call again.
+/// Part order is reasoning → (structured | text + tool calls). A `Structured`
+/// value, when present, is emitted as the last part (and supersedes text/tools,
+/// which a structured request won't have). Tool calls set the finish reason to
+/// `ToolCall`, which drives the chat loop to execute them and call again.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     model_id: &str,
     reasoning_text: String,
     text: String,
     calls: Vec<FunctionCall>,
+    structured: Option<Value>,
     input_tokens: usize,
     output_tokens: usize,
     max_tokens: usize,
@@ -34,11 +38,15 @@ pub fn build(
     if !reasoning_text.trim().is_empty() {
         parts.push(PartEnum::Reasoning(Reasoning::new(reasoning_text)));
     }
-    if !text.trim().is_empty() {
-        parts.push(PartEnum::Text(Text::new(text)));
-    }
-    for call in calls {
-        parts.push(PartEnum::from_function_call(call));
+    if let Some(value) = structured {
+        parts.push(PartEnum::Structured(value));
+    } else {
+        if !text.trim().is_empty() {
+            parts.push(PartEnum::Text(Text::new(text)));
+        }
+        for call in calls {
+            parts.push(PartEnum::from_function_call(call));
+        }
     }
 
     let content = Content {

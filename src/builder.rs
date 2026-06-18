@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use chat_core::error::{ChatError, ChatFailure};
 use chat_core::types::provider_meta::ProviderMeta;
 
-use crate::client::MlxClient;
+use crate::client::{MlxClient, StructuredMode};
 use crate::loader;
 use crate::parsers::tool::{self, Pattern, ToolFormat};
 
@@ -26,6 +26,7 @@ pub struct MlxBuilder<M = WithoutModel> {
     max_context: Option<i32>,
     sink_tokens: i32,
     format: Option<Arc<dyn ToolFormat>>,
+    structured_mode: StructuredMode,
     description: Option<String>,
     _m: PhantomData<M>,
 }
@@ -45,6 +46,7 @@ impl MlxBuilder<WithoutModel> {
             max_context: Some(4096),
             sink_tokens: 4,
             format: None,
+            structured_mode: StructuredMode::default(),
             description: None,
             _m: PhantomData,
         }
@@ -60,6 +62,7 @@ impl MlxBuilder<WithoutModel> {
             max_context: self.max_context,
             sink_tokens: self.sink_tokens,
             format: self.format,
+            structured_mode: self.structured_mode,
             description: self.description,
             _m: PhantomData,
         }
@@ -112,6 +115,14 @@ impl<M> MlxBuilder<M> {
         }));
         self
     }
+
+    /// Choose how structured output is enforced: prompt-and-parse
+    /// ([`StructuredMode::Prompt`], default) or grammar-masked decoding
+    /// ([`StructuredMode::Constrained`]).
+    pub fn with_structured_mode(mut self, mode: StructuredMode) -> Self {
+        self.structured_mode = mode;
+        self
+    }
 }
 
 impl MlxBuilder<WithModel> {
@@ -144,6 +155,8 @@ impl MlxBuilder<WithModel> {
             max_context: self.max_context,
             sink_tokens: self.sink_tokens,
             format,
+            structured_mode: self.structured_mode,
+            token_strings: Arc::new(std::sync::OnceLock::new()),
             meta,
         })
     }

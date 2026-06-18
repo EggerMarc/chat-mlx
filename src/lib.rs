@@ -11,4 +11,4 @@ mod builder;
 mod client;
 
 pub use builder::{MlxBuilder, WithModel, WithoutModel};
-pub use client::MlxClient;
+pub use client::{MlxClient, StructuredMode};

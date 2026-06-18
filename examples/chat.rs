@@ -1,13 +1,14 @@
-//! Interactive, streaming chat REPL over the chat-mlx provider — the one
-//! example that exercises everything: CLI-composed session config, multi-turn
-//! history, live streaming, gray-rendered `<think>` reasoning, and tool calling.
+//! Interactive, streaming chat REPL over the chat-mlx provider: CLI-composed
+//! session config, multi-turn history, live streaming, gray-rendered `<think>`
+//! reasoning, and tool calling. (See `examples/structured.rs` for structured
+//! output.)
 //!
 //!   cargo run --release --example chat -- \
 //!     --model Qwen/Qwen3-0.6B --system "You are a pirate." --temp 0.7 --top-k 40
 //!
-//! A demo `get_weather` tool is always registered; ask about the weather to see
-//! the tool round-trip. Type a message and press enter; `/quit` (or Ctrl-D)
-//! exits. Streaming is on by default (disable with `--no-default-features`).
+//! A demo `get_weather` tool is registered; ask about the weather to see the
+//! round-trip. Type a message; `/quit` (or Ctrl-D) exits. Streaming is on by
+//! default (disable with `--no-default-features`).
 
 use std::io::{self, BufRead, Write};
 
@@ -111,9 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         cli.max_tokens,
         if cli.quantize { " quantized" } else { "" },
     );
-    eprintln!(
-        "[chat] tool: get_weather(city). reasoning in gray. /quit or Ctrl-D to exit.\n"
-    );
+    eprintln!("[chat] tool: get_weather(city). reasoning in gray. /quit or Ctrl-D to exit.\n");
 
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();

@@ -1,4 +1,6 @@
+pub mod json;
 pub mod reasoning;
+pub mod structured;
 pub mod tool;
 
 /// Length of the longest suffix of `s` that is a proper prefix of `marker`.

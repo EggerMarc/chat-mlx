@@ -9,6 +9,7 @@ use mlx_rs::{
 
 use super::{
     cache::KvCache,
+    constraint::LogitMask,
     model::Model,
     sampler::{SampleOpts, sample},
 };
@@ -74,6 +75,58 @@ pub fn generate<F: FnMut(u32)>(
                 break;
             }
         }
+    }
+    let decode_secs = t_decode.elapsed().as_secs_f64();
+
+    Ok(GenStats {
+        tokens: out,
+        prefill_secs,
+        decode_secs,
+    })
+}
+
+/// Like [`generate`], but applies a [`LogitMask`] before sampling each token
+/// (constrained decoding). Runs one token per eval — the mask depends on the
+/// realized token, so the batched pipeline can't be used.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_constrained<F: FnMut(u32)>(
+    model: &mut Model,
+    prompt_ids: &[u32],
+    max_tokens: usize,
+    opts: &SampleOpts,
+    eos: &[u32],
+    cache: &mut [KvCache],
+    constraint: &mut dyn LogitMask,
+    mut on_token: F,
+) -> Result<GenStats> {
+    let prompt = Array::from(prompt_ids).index(NewAxis);
+
+    let t_prefill = Instant::now();
+    let logits = model.forward(&prompt, cache)?;
+    let last = constraint.mask(&logits.index((.., -1, ..)))?;
+    let mut y = sample(&last, opts)?;
+    eval([&y])?;
+    let prefill_secs = t_prefill.elapsed().as_secs_f64();
+
+    let t_decode = Instant::now();
+    let mut out = Vec::with_capacity(max_tokens);
+    loop {
+        let id = y.item::<u32>();
+        if eos.contains(&id) {
+            break;
+        }
+        on_token(id);
+        out.push(id);
+        constraint.accept(id);
+        if out.len() >= max_tokens {
+            break;
+        }
+
+        let next = y.index((.., NewAxis));
+        let logits = model.forward(&next, cache)?;
+        let logits = constraint.mask(&logits.squeeze_axes(&[1])?)?;
+        y = sample(&logits, opts)?;
+        eval([&y])?;
     }
     let decode_secs = t_decode.elapsed().as_secs_f64();
 

@@ -9,9 +9,10 @@ use chat_core::types::response::ChatResponse;
 use chat_core::types::tools::ToolDeclarations;
 
 use crate::api::types::{error, request, response};
-use crate::client::MlxClient;
+use crate::client::{MlxClient, StructuredMode};
 use crate::engine::generate;
-use crate::parsers::reasoning;
+use crate::parsers::json::JsonConstraint;
+use crate::parsers::{reasoning, structured};
 
 #[async_trait]
 impl CompletionProvider for MlxClient {
@@ -45,6 +46,13 @@ impl CompletionProvider for MlxClient {
         let ids = encoding.get_ids();
         let input_tokens = ids.len();
 
+        // For constrained structured output, build the JSON grammar mask up
+        // front (decoding the vocab is independent of the model lock).
+        let constrained =
+            structured_output.is_some() && self.structured_mode == StructuredMode::Constrained;
+        let mut json_constraint =
+            constrained.then(|| JsonConstraint::new(self.token_strings(), self.eos.clone()));
+
         // Lock the model for the duration of the (synchronous) decode. No await
         // is held across the guard, so the future stays `Send`.
         let mut model = self
@@ -53,16 +61,28 @@ impl CompletionProvider for MlxClient {
             .map_err(|_| error::provider("model mutex poisoned"))?;
         let mut cache = model.make_cache(self.max_context, self.sink_tokens);
 
-        let stats = generate::generate(
-            &mut model,
-            ids,
-            prepared.max_tokens,
-            &prepared.sampler,
-            &self.eos,
-            self.tokens_per_eval,
-            &mut cache,
-            |_| {},
-        )
+        let stats = match json_constraint.as_mut() {
+            Some(con) => generate::generate_constrained(
+                &mut model,
+                ids,
+                prepared.max_tokens,
+                &prepared.sampler,
+                &self.eos,
+                &mut cache,
+                con,
+                |_| {},
+            ),
+            None => generate::generate(
+                &mut model,
+                ids,
+                prepared.max_tokens,
+                &prepared.sampler,
+                &self.eos,
+                self.tokens_per_eval,
+                &mut cache,
+                |_| {},
+            ),
+        }
         .map_err(|e| error::provider(format!("generation failed: {e}")))?;
         drop(model);
 
@@ -72,18 +92,33 @@ impl CompletionProvider for MlxClient {
             .map_err(|e| error::invalid(format!("tokenizer decode: {e}")))?;
 
         let (reasoning_text, body) = reasoning::split(&raw);
-        let (calls, text) = if tools.is_some() {
+
+        let mut structured = None;
+        let mut calls = Vec::new();
+        let mut text = String::new();
+
+        if structured_output.is_some() {
+            // Both modes parse the emitted JSON; constrained decoding has
+            // already guaranteed it is well-formed. On a parse miss, hand back
+            // the raw text so the chat loop's retry can take over.
+            match structured::extract(&body) {
+                Some(v) => structured = Some(v),
+                None => text = body,
+            }
+        } else if tools.is_some() {
             let parsed = self.format.parse(&body);
-            (parsed.calls, parsed.text)
+            calls = parsed.calls;
+            text = parsed.text;
         } else {
-            (Vec::new(), body)
-        };
+            text = body;
+        }
 
         Ok(response::build(
             &self.model_id,
             reasoning_text,
             text,
             calls,
+            structured,
             input_tokens,
             stats.tokens.len(),
             prepared.max_tokens,
