@@ -20,7 +20,47 @@ pub struct Loaded {
     pub model_type: String,
 }
 
-pub fn load(model_id: &str, quantize: bool) -> Result<Loaded> {
+/// Runtime quantization level (MLX group-affine, group size 64). Lower bits =
+/// less memory bandwidth per token (faster decode) at some quality cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quantize {
+    /// 2-bit — fastest, lowest quality.
+    Q2,
+    /// 3-bit.
+    Q3,
+    /// 4-bit — the usual sweet spot.
+    Q4,
+    /// 8-bit — highest quality of the quantized options.
+    Q8,
+}
+
+impl Quantize {
+    pub fn bits(self) -> i32 {
+        match self {
+            Quantize::Q2 => 2,
+            Quantize::Q3 => 3,
+            Quantize::Q4 => 4,
+            Quantize::Q8 => 8,
+        }
+    }
+
+    pub fn group_size(self) -> i32 {
+        64
+    }
+
+    /// Map a bit width to a level, if supported.
+    pub fn from_bits(bits: i32) -> Option<Quantize> {
+        match bits {
+            2 => Some(Quantize::Q2),
+            3 => Some(Quantize::Q3),
+            4 => Some(Quantize::Q4),
+            8 => Some(Quantize::Q8),
+            _ => None,
+        }
+    }
+}
+
+pub fn load(model_id: &str, quant: Option<Quantize>) -> Result<Loaded> {
     let api = Api::new()?;
     let repo = api.repo(Repo::new(model_id.to_string(), RepoType::Model));
 
@@ -54,8 +94,8 @@ pub fn load(model_id: &str, quantize: bool) -> Result<Loaded> {
         model.tie_lm_head();
     }
 
-    if quantize {
-        model = mlx_rs::nn::quantize(model, Some(64), Some(4))?;
+    if let Some(q) = quant {
+        model = mlx_rs::nn::quantize(model, Some(q.group_size()), Some(q.bits()))?;
     }
 
     Ok(Loaded {

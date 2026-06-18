@@ -21,7 +21,7 @@ use clap::Parser;
 use futures::StreamExt;
 use tools_rs::{collect_tools, tool};
 
-use chat_mlx::MlxBuilder;
+use chat_mlx::{MlxBuilder, Quantize};
 
 const GRAY: &str = "\x1b[90m";
 const CYAN: &str = "\x1b[36m";
@@ -75,11 +75,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
 
     eprintln!("[chat] loading {} …", cli.model);
-    let client = MlxBuilder::new()
+    let mut builder = MlxBuilder::new()
         .with_model(cli.model.clone())
-        .with_quantize(cli.quantize)
-        .with_max_context(cli.max_context)
-        .build()?;
+        .with_max_context(cli.max_context);
+    if cli.quantize {
+        builder = builder.with_quantize(Quantize::Q4);
+    }
+    let client = builder.build()?;
 
     let mut options = ChatOptions::default();
     options.temperature = Some(cli.temp);

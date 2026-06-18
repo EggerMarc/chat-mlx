@@ -5,7 +5,7 @@ use chat_core::error::{ChatError, ChatFailure};
 use chat_core::types::provider_meta::ProviderMeta;
 
 use crate::client::{MlxClient, StructuredMode};
-use crate::loader;
+use crate::loader::{self, Quantize};
 use crate::parsers::tool::{self, Pattern, ToolFormat};
 
 /// Typestate marker — no model id set yet, `build()` is not callable.
@@ -21,7 +21,7 @@ pub struct WithModel;
 /// block.
 pub struct MlxBuilder<M = WithoutModel> {
     model_id: Option<String>,
-    quantize: bool,
+    quant: Option<Quantize>,
     tokens_per_eval: usize,
     max_context: Option<i32>,
     sink_tokens: i32,
@@ -41,7 +41,7 @@ impl MlxBuilder<WithoutModel> {
     pub fn new() -> Self {
         Self {
             model_id: None,
-            quantize: false,
+            quant: None,
             tokens_per_eval: 8,
             max_context: Some(4096),
             sink_tokens: 4,
@@ -57,7 +57,7 @@ impl MlxBuilder<WithoutModel> {
     pub fn with_model(self, id: impl Into<String>) -> MlxBuilder<WithModel> {
         MlxBuilder {
             model_id: Some(id.into()),
-            quantize: self.quantize,
+            quant: self.quant,
             tokens_per_eval: self.tokens_per_eval,
             max_context: self.max_context,
             sink_tokens: self.sink_tokens,
@@ -70,9 +70,9 @@ impl MlxBuilder<WithoutModel> {
 }
 
 impl<M> MlxBuilder<M> {
-    /// Runtime-quantize the loaded fp weights to 4-bit (group size 64).
-    pub fn with_quantize(mut self, quantize: bool) -> Self {
-        self.quantize = quantize;
+    /// Runtime-quantize the loaded fp weights to the given level (group size 64).
+    pub fn with_quantize(mut self, quant: Quantize) -> Self {
+        self.quant = Some(quant);
         self
     }
 
@@ -130,7 +130,7 @@ impl MlxBuilder<WithModel> {
     pub fn build(self) -> Result<MlxClient, ChatFailure> {
         let model_id = self.model_id.expect("with_model() sets model_id");
 
-        let loaded = loader::load(&model_id, self.quantize).map_err(|e| {
+        let loaded = loader::load(&model_id, self.quant).map_err(|e| {
             ChatFailure::from_err(ChatError::Provider(format!(
                 "chat-mlx failed to load {model_id}: {e}"
             )))

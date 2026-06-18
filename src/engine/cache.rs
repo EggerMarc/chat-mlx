@@ -35,6 +35,16 @@ impl KvCache {
         self.offset
     }
 
+    /// Roll the cache back to `len` tokens, discarding any beyond it. Used by
+    /// speculative decoding to drop over-fed (rejected) draft tokens. Valid in
+    /// the contiguous regime (growable cache, or a rotating cache that hasn't
+    /// wrapped) — which is what the speculative path runs in.
+    pub fn truncate(&mut self, len: i32) {
+        let len = len.clamp(0, self.offset);
+        self.offset = len;
+        self.size = len;
+    }
+
     pub fn update_and_fetch(
         &mut self,
         k: &Array,

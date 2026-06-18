@@ -49,9 +49,25 @@ struct Cli {
     #[clap(long, default_value = "4")]
     sink_tokens: i32,
 
-    /// Runtime-quantize the loaded fp weights to 4-bit (group size 64).
+    /// Runtime-quantize the loaded fp weights (group size 64).
     #[clap(long)]
     quantize: bool,
+
+    /// Quantization bit width when --quantize is set (2, 3, 4, or 8).
+    #[clap(long, default_value = "4")]
+    bits: i32,
+
+    /// Greedy decode with n-gram / prompt-lookup speculation (forces a growable cache).
+    #[clap(long)]
+    ngram: bool,
+
+    /// N-gram suffix length to match for speculation.
+    #[clap(long, default_value = "3")]
+    ngram_n: usize,
+
+    /// Max draft tokens proposed per speculation round.
+    #[clap(long, default_value = "8")]
+    ngram_k: usize,
 
     /// PRNG seed.
     #[clap(long, default_value = "0")]
@@ -62,8 +78,17 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     mlx_rs::random::seed(cli.seed)?;
 
+    let quant = if cli.quantize {
+        Some(
+            chat_mlx::Quantize::from_bits(cli.bits)
+                .ok_or_else(|| anyhow::anyhow!("unsupported --bits {} (use 2, 3, 4, or 8)", cli.bits))?,
+        )
+    } else {
+        None
+    };
+
     eprintln!("[info] loading {} …", cli.model);
-    let loaded = loader::load(&cli.model, cli.quantize)?;
+    let loaded = loader::load(&cli.model, quant)?;
     let args = &loaded.args;
     eprintln!(
         "[info] model: dim={} layers={} heads={}/{} head_dim={} vocab={}",
@@ -89,31 +114,43 @@ fn main() -> Result<()> {
         top_p: cli.top_p,
     };
     let mut stream = tokenizer.decode_stream(true);
+    let mut emit = |id: u32| {
+        if let Ok(Some(s)) = stream.step(id) {
+            print!("{s}");
+            let _ = std::io::stdout().flush();
+        }
+    };
 
-    let max_context = (cli.max_context > 0).then_some(cli.max_context);
-    if let Some(n) = max_context {
+    let stats = if cli.ngram {
         eprintln!(
-            "[info] rotating KV cache: window={} sink={}",
-            n, cli.sink_tokens
+            "[info] n-gram speculation: n={} k={} (greedy, growable cache)",
+            cli.ngram_n, cli.ngram_k
         );
-    }
-    let mut kv_cache = m.make_cache(max_context, cli.sink_tokens);
-
-    let stats = generate::generate(
-        &mut m,
-        ids,
-        cli.max_tokens,
-        &opts,
-        &eos,
-        cli.tokens_per_eval,
-        &mut kv_cache,
-        |id| {
-            if let Ok(Some(s)) = stream.step(id) {
-                print!("{s}");
-                let _ = std::io::stdout().flush();
-            }
-        },
-    )?;
+        let mut kv_cache = m.make_cache(None, cli.sink_tokens);
+        generate::generate_ngram(
+            &mut m,
+            ids,
+            cli.max_tokens,
+            &eos,
+            &mut kv_cache,
+            cli.ngram_n,
+            cli.ngram_k,
+            &mut emit,
+        )?
+    } else {
+        let max_context = (cli.max_context > 0).then_some(cli.max_context);
+        let mut kv_cache = m.make_cache(max_context, cli.sink_tokens);
+        generate::generate(
+            &mut m,
+            ids,
+            cli.max_tokens,
+            &opts,
+            &eos,
+            cli.tokens_per_eval,
+            &mut kv_cache,
+            &mut emit,
+        )?
+    };
     println!();
 
     let n = stats.tokens.len();

@@ -271,9 +271,21 @@ impl Model {
     pub fn forward(&mut self, tokens: &Array, cache: &mut [KvCache]) -> Result<Array, Exception> {
         let mut h = self.model.embed_tokens.forward(tokens)?;
 
-        let mask = if h.shape()[1] > 1 {
-            let m = nn::MultiHeadAttention::create_additive_causal_mask::<f32>(h.shape()[1])?;
-            Some(m.as_dtype(h.dtype())?)
+        // For a multi-token step the queries must attend causally to themselves
+        // *and* to everything already in the cache. The causal triangle is
+        // [L, L]; prepend an all-attend block for the `offset` cached keys to
+        // get the [L, offset+L] mask SDPA expects.
+        let l = h.shape()[1];
+        let offset = cache.first().map_or(0, |c| c.offset());
+        let mask = if l > 1 {
+            let causal =
+                nn::MultiHeadAttention::create_additive_causal_mask::<f32>(l)?.as_dtype(h.dtype())?;
+            if offset > 0 {
+                let pad = mlx_rs::ops::zeros_dtype(&[l, offset], h.dtype())?;
+                Some(mlx_rs::ops::concatenate_axis(&[&pad, &causal], 1)?)
+            } else {
+                Some(causal)
+            }
         } else {
             None
         };
