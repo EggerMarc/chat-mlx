@@ -35,21 +35,13 @@ impl KvCache {
         self.offset
     }
 
-    /// Roll the cache back to `len` tokens, discarding any beyond it. Used by
-    /// speculative decoding to drop over-fed (rejected) draft tokens. Valid in
-    /// the contiguous regime (growable cache, or a rotating cache that hasn't
-    /// wrapped) — which is what the speculative path runs in.
     pub fn truncate(&mut self, len: i32) {
         let len = len.clamp(0, self.offset);
         self.offset = len;
         self.size = len;
     }
 
-    pub fn update_and_fetch(
-        &mut self,
-        k: &Array,
-        v: &Array,
-    ) -> Result<(Array, Array), Exception> {
+    pub fn update_and_fetch(&mut self, k: &Array, v: &Array) -> Result<(Array, Array), Exception> {
         let l = k.shape()[2];
         match self.max_size {
             Some(max) => self.update_rotating(k, v, l, max),
@@ -162,10 +154,22 @@ impl KvCache {
             self.offset += l;
         } else {
             let recent = max - self.keep;
-            kb.index_mut((.., .., 0..self.keep, ..), k.index((.., .., 0..self.keep, ..)));
-            kb.index_mut((.., .., self.keep..max, ..), k.index((.., .., (l - recent)..l, ..)));
-            vb.index_mut((.., .., 0..self.keep, ..), v.index((.., .., 0..self.keep, ..)));
-            vb.index_mut((.., .., self.keep..max, ..), v.index((.., .., (l - recent)..l, ..)));
+            kb.index_mut(
+                (.., .., 0..self.keep, ..),
+                k.index((.., .., 0..self.keep, ..)),
+            );
+            kb.index_mut(
+                (.., .., self.keep..max, ..),
+                k.index((.., .., (l - recent)..l, ..)),
+            );
+            vb.index_mut(
+                (.., .., 0..self.keep, ..),
+                v.index((.., .., 0..self.keep, ..)),
+            );
+            vb.index_mut(
+                (.., .., self.keep..max, ..),
+                v.index((.., .., (l - recent)..l, ..)),
+            );
             self.size = max;
             self.ring = self.keep;
             self.offset += l;

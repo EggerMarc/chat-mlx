@@ -14,23 +14,26 @@ pub trait ToolFormat: Send + Sync {
     fn render_call(&self, call: &FunctionCall) -> String;
     fn render_result(&self, resp: &FunctionResponse) -> (&'static str, String);
     fn parse(&self, text: &str) -> ParsedTools;
-
-    /// The `(open, close)` markers wrapping a call, if delimiter-based. Used to
-    /// hide in-progress call markup while streaming.
     fn call_delimiters(&self) -> Option<(String, String)> {
         None
     }
 }
 
 pub fn detect(model_type: &str) -> Arc<dyn ToolFormat> {
-    let _ = model_type;
-    Arc::new(Hermes)
+    let mt = model_type.to_lowercase();
+    if mt.contains("mistral") || mt.contains("mixtral") {
+        Arc::new(Mistral)
+    } else if mt.contains("llama") {
+        Arc::new(Json)
+    } else {
+        Arc::new(Hermes)
+    }
 }
 
 #[derive(Deserialize)]
 struct RawCall {
     name: String,
-    #[serde(default)]
+    #[serde(default, alias = "parameters")]
     arguments: Value,
 }
 
@@ -68,6 +71,63 @@ fn extract_spans(text: &str, open: &str, close: &str) -> (Vec<String>, String) {
     }
     residual.push_str(rest);
     (inners, residual)
+}
+
+fn balanced_end(b: &[u8], start: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    for (i, &c) in b.iter().enumerate().skip(start) {
+        if in_str {
+            match c {
+                _ if esc => esc = false,
+                b'\\' => esc = true,
+                b'"' => in_str = false,
+                _ => {}
+            }
+        } else {
+            match c {
+                b'"' => in_str = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Pull every balanced `{…}` that parses as a `{name, arguments|parameters}`
+/// call out of free text (no delimiters), returning the calls and the residual.
+fn parse_json_calls(text: &str) -> ParsedTools {
+    let b = text.as_bytes();
+    let mut calls = Vec::new();
+    let mut residual = String::new();
+    let mut i = 0;
+    let mut copy_from = 0;
+    while i < b.len() {
+        if b[i] == b'{'
+            && let Some(end) = balanced_end(b, i)
+            && let Some(call) = raw_to_call(&text[i..=end])
+        {
+            residual.push_str(&text[copy_from..i]);
+            calls.push(call);
+            i = end + 1;
+            copy_from = i;
+            continue;
+        }
+        i += 1;
+    }
+    residual.push_str(&text[copy_from..]);
+    ParsedTools {
+        calls,
+        text: residual.trim().to_string(),
+    }
 }
 
 pub struct Hermes;
@@ -172,9 +232,81 @@ impl ToolFormat for Pattern {
     }
 }
 
-/// Incrementally drops `open … close` spans from a streamed text so in-progress
-/// tool-call markup isn't shown live. The full text is still parsed for calls
-/// separately (off the reasoning splitter's accumulation).
+pub struct Json;
+
+impl ToolFormat for Json {
+    fn system_with_tools(&self, base: &str, tools: &Value) -> String {
+        let mut out = String::new();
+        if !base.is_empty() {
+            out.push_str(base);
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!(
+            "You have access to the following functions (JSON Schema):\n{tools}\n\n\
+             To call a function, respond with a single JSON object of the form \
+             {{\"name\": <function-name>, \"parameters\": <arguments-json-object>}} and nothing else.",
+        ));
+        out
+    }
+
+    fn render_call(&self, call: &FunctionCall) -> String {
+        serde_json::json!({ "name": call.name, "parameters": call.arguments }).to_string()
+    }
+
+    fn render_result(&self, resp: &FunctionResponse) -> (&'static str, String) {
+        ("tool", resp.result.to_string())
+    }
+
+    fn parse(&self, text: &str) -> ParsedTools {
+        parse_json_calls(text)
+    }
+}
+
+pub struct Mistral;
+
+const MISTRAL_MARKER: &str = "[TOOL_CALLS]";
+
+impl ToolFormat for Mistral {
+    fn system_with_tools(&self, base: &str, tools: &Value) -> String {
+        let mut out = String::new();
+        if !base.is_empty() {
+            out.push_str(base);
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!(
+            "You have access to the following functions (JSON Schema):\n{tools}\n\n\
+             To call functions, respond with {MISTRAL_MARKER} followed by a JSON array of \
+             {{\"name\": <function-name>, \"arguments\": <arguments-json-object>}} objects.",
+        ));
+        out
+    }
+
+    fn render_call(&self, call: &FunctionCall) -> String {
+        let obj = serde_json::json!([{ "name": call.name, "arguments": call.arguments }]);
+        format!("{MISTRAL_MARKER}{obj}")
+    }
+
+    fn render_result(&self, resp: &FunctionResponse) -> (&'static str, String) {
+        ("tool", resp.result.to_string())
+    }
+
+    fn parse(&self, text: &str) -> ParsedTools {
+        match text.find(MISTRAL_MARKER) {
+            Some(idx) => {
+                let calls = parse_json_calls(&text[idx + MISTRAL_MARKER.len()..]).calls;
+                ParsedTools {
+                    calls,
+                    text: text[..idx].trim().to_string(),
+                }
+            }
+            None => ParsedTools {
+                calls: Vec::new(),
+                text: text.trim().to_string(),
+            },
+        }
+    }
+}
+
 pub struct ToolCallStripper {
     open: String,
     close: String,
@@ -192,7 +324,6 @@ impl ToolCallStripper {
         }
     }
 
-    /// Feed a text piece; returns the portion safe to display now.
     pub fn push(&mut self, piece: &str) -> String {
         self.pending.push_str(piece);
         let mut out = String::new();
@@ -224,7 +355,6 @@ impl ToolCallStripper {
         out
     }
 
-    /// Flush trailing displayable text (anything outside an unterminated call).
     pub fn flush(&mut self) -> String {
         if self.inside {
             self.pending.clear();
@@ -273,5 +403,59 @@ mod tests {
         let out = p.parse("a[[{\"name\":\"f\",\"arguments\":{}}]]b");
         assert_eq!(out.calls.len(), 1);
         assert_eq!(out.text, "ab");
+    }
+
+    #[test]
+    fn json_parses_bare_object_with_parameters() {
+        // Llama-style: bare JSON object using the `parameters` key.
+        let out = Json.parse(
+            "Let me check. {\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}}",
+        );
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(out.calls[0].name, "get_weather");
+        assert_eq!(out.calls[0].arguments["city"], "Paris");
+        assert_eq!(out.text, "Let me check.");
+    }
+
+    #[test]
+    fn json_ignores_non_call_objects() {
+        let out = Json.parse("{\"unrelated\": 1}");
+        assert!(out.calls.is_empty());
+        assert_eq!(out.text, "{\"unrelated\": 1}");
+    }
+
+    #[test]
+    fn mistral_parses_tool_calls_array() {
+        let out = Mistral.parse(
+            "sure[TOOL_CALLS][{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}]",
+        );
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(out.calls[0].name, "get_weather");
+        assert_eq!(out.calls[0].arguments["city"], "Paris");
+        assert_eq!(out.text, "sure");
+    }
+
+    #[test]
+    fn detect_routes_by_family() {
+        // Smoke-test routing via each format's distinctive render.
+        assert!(detect("llama").render_call(&fc()).starts_with('{'));
+        assert!(
+            detect("mistral")
+                .render_call(&fc())
+                .starts_with("[TOOL_CALLS]")
+        );
+        assert!(
+            detect("qwen3")
+                .render_call(&fc())
+                .starts_with("<tool_call>")
+        );
+    }
+
+    fn fc() -> FunctionCall {
+        FunctionCall {
+            id: None,
+            name: "f".into(),
+            arguments: serde_json::json!({}),
+        }
     }
 }

@@ -5,10 +5,6 @@ pub struct Turn {
     pub content: String,
 }
 
-/// Renders a conversation into the model's prompt format. Prefers the model's
-/// own Hugging Face `chat_template` (Jinja, from `tokenizer_config.json`) so
-/// non-ChatML families (Llama, Gemma, …) get the right framing; falls back to
-/// ChatML when no template is present or rendering fails.
 pub struct ChatTemplate {
     template: Option<String>,
     bos_token: String,
@@ -24,7 +20,6 @@ impl ChatTemplate {
         }
     }
 
-    /// ChatML-only template (no model template). Used as an explicit fallback.
     pub fn chatml_only() -> Self {
         Self {
             template: None,
@@ -47,7 +42,6 @@ impl ChatTemplate {
         env.add_function("raise_exception", |msg: String| {
             Err::<String, _>(Error::new(ErrorKind::InvalidOperation, msg))
         });
-        // Some templates (e.g. Llama 3.1) call this for a system date stamp.
         env.add_function("strftime_now", |_fmt: String| Ok::<_, Error>(String::new()));
 
         let messages: Vec<serde_json::Value> = turns

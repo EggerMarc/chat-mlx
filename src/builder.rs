@@ -8,17 +8,9 @@ use crate::client::{MlxClient, StructuredMode};
 use crate::loader::{self, Quantize};
 use crate::parsers::tool::{self, Pattern, ToolFormat};
 
-/// Typestate marker — no model id set yet, `build()` is not callable.
 pub struct WithoutModel;
-/// Typestate marker — model id is set, `build()` is callable.
 pub struct WithModel;
 
-/// Builder for [`MlxClient`].
-///
-/// `with_model` sets the Hugging Face repo id (e.g. `Qwen/Qwen3-0.6B`) and
-/// transitions the builder so `.build()` becomes callable. `build()` is
-/// synchronous: the HF download (hf-hub sync API) and MLX weight load both
-/// block.
 pub struct MlxBuilder<M = WithoutModel> {
     model_id: Option<String>,
     quant: Option<Quantize>,
@@ -52,8 +44,6 @@ impl MlxBuilder<WithoutModel> {
         }
     }
 
-    /// Set the Hugging Face repo id. Transitions the builder so `.build()`
-    /// becomes callable.
     pub fn with_model(self, id: impl Into<String>) -> MlxBuilder<WithModel> {
         MlxBuilder {
             model_id: Some(id.into()),
@@ -70,26 +60,21 @@ impl MlxBuilder<WithoutModel> {
 }
 
 impl<M> MlxBuilder<M> {
-    /// Runtime-quantize the loaded fp weights to the given level (group size 64).
     pub fn with_quantize(mut self, quant: Quantize) -> Self {
         self.quant = Some(quant);
         self
     }
 
-    /// Number of decode steps batched per MLX `eval` (amortises GPU<->host sync).
     pub fn with_tokens_per_eval(mut self, n: usize) -> Self {
         self.tokens_per_eval = n.max(1);
         self
     }
 
-    /// Max tokens retained in the rotating KV cache. `0` disables the cap
-    /// (unbounded growable cache).
     pub fn with_max_context(mut self, n: i32) -> Self {
         self.max_context = (n > 0).then_some(n);
         self
     }
 
-    /// Leading tokens pinned as attention sinks when the KV window rotates.
     pub fn with_sink_tokens(mut self, n: i32) -> Self {
         self.sink_tokens = n.max(0);
         self
@@ -100,14 +85,11 @@ impl<M> MlxBuilder<M> {
         self
     }
 
-    /// Override the auto-detected tool-call format with a specific one.
     pub fn with_tool_format(mut self, format: Arc<dyn ToolFormat>) -> Self {
         self.format = Some(format);
         self
     }
 
-    /// Parse tool calls from output using custom delimiters: everything between
-    /// `open` and `close` is treated as the call JSON. Overrides detection.
     pub fn with_tool_pattern(mut self, open: impl Into<String>, close: impl Into<String>) -> Self {
         self.format = Some(Arc::new(Pattern {
             open: open.into(),
@@ -116,9 +98,6 @@ impl<M> MlxBuilder<M> {
         self
     }
 
-    /// Choose how structured output is enforced: prompt-and-parse
-    /// ([`StructuredMode::Prompt`], default) or grammar-masked decoding
-    /// ([`StructuredMode::Constrained`]).
     pub fn with_structured_mode(mut self, mode: StructuredMode) -> Self {
         self.structured_mode = mode;
         self
@@ -126,7 +105,6 @@ impl<M> MlxBuilder<M> {
 }
 
 impl MlxBuilder<WithModel> {
-    /// Download (on first use) and load the model, returning a ready client.
     pub fn build(self) -> Result<MlxClient, ChatFailure> {
         let model_id = self.model_id.expect("with_model() sets model_id");
 

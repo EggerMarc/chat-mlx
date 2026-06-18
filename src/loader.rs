@@ -1,5 +1,6 @@
-use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashSet};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use hf_hub::{
@@ -22,17 +23,11 @@ pub struct Loaded {
     pub chat_template: ChatTemplate,
 }
 
-/// Runtime quantization level (MLX group-affine, group size 64). Lower bits =
-/// less memory bandwidth per token (faster decode) at some quality cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Quantize {
-    /// 2-bit — fastest, lowest quality.
     Q2,
-    /// 3-bit.
     Q3,
-    /// 4-bit — the usual sweet spot.
     Q4,
-    /// 8-bit — highest quality of the quantized options.
     Q8,
 }
 
@@ -50,7 +45,6 @@ impl Quantize {
         64
     }
 
-    /// Map a bit width to a level, if supported.
     pub fn from_bits(bits: i32) -> Option<Quantize> {
         match bits {
             2 => Some(Quantize::Q2),
@@ -75,13 +69,27 @@ pub fn load(model_id: &str, quant: Option<Quantize>) -> Result<Loaded> {
         Err(_) => GenerationConfig::default(),
     };
 
-    let eos = gen_cfg.eos_or_default();
-
     let hf: HfConfig = serde_json::from_reader(std::fs::File::open(config_path)?)?;
     let model_type = hf.model_type.clone();
-    let args: ModelArgs = hf.into();
+    let cfg_tied = hf.tie_word_embeddings;
+    let mut args: ModelArgs = hf.into();
+
+    let arch = detect_arch(&repo, &weight_paths)?;
+    args.use_qk_norm = arch.use_qk_norm;
+    args.attn_qkv_bias = arch.attn_qkv_bias;
+    args.attn_o_bias = arch.attn_o_bias;
+    args.tie_word_embeddings = cfg_tied || arch.no_lm_head;
+
     let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(|e| anyhow::anyhow!(e))?;
-    let chat_template = build_chat_template(&repo);
+    let (chat_template, eos_token) = read_chat_config(&repo);
+
+    let mut eos = gen_cfg.eos_token_id.clone();
+    if eos.is_empty()
+        && !eos_token.is_empty()
+        && let Some(id) = tokenizer.token_to_id(&eos_token)
+    {
+        eos.push(id);
+    }
 
     let mut model = Model::new(&args)?;
     for p in &weight_paths {
@@ -90,9 +98,6 @@ pub fn load(model_id: &str, quant: Option<Quantize>) -> Result<Loaded> {
             .context("load_safetensors (struct field names must match HF tensor keys)")?;
     }
 
-    // Models with tied embeddings (e.g. Qwen2.5) ship no `lm_head.weight`;
-    // share the input embeddings into the output projection. Must precede
-    // quantization.
     if args.tie_word_embeddings {
         model.tie_lm_head();
     }
@@ -111,9 +116,54 @@ pub fn load(model_id: &str, quant: Option<Quantize>) -> Result<Loaded> {
     })
 }
 
-/// Read the model's `chat_template` (+ bos/eos tokens) from
-/// `tokenizer_config.json`. Falls back to ChatML if the file or field is absent.
-fn build_chat_template(repo: &ApiRepo) -> ChatTemplate {
+struct Arch {
+    use_qk_norm: bool,
+    attn_qkv_bias: bool,
+    attn_o_bias: bool,
+    no_lm_head: bool,
+}
+
+fn detect_arch(repo: &ApiRepo, weight_paths: &[PathBuf]) -> Result<Arch> {
+    let names = tensor_names(repo, weight_paths)?;
+    let any = |suffix: &str| names.iter().any(|n| n.ends_with(suffix));
+    Ok(Arch {
+        use_qk_norm: any(".self_attn.q_norm.weight"),
+        attn_qkv_bias: any(".self_attn.q_proj.bias"),
+        attn_o_bias: any(".self_attn.o_proj.bias"),
+        no_lm_head: !names.contains("lm_head.weight"),
+    })
+}
+
+fn tensor_names(repo: &ApiRepo, weight_paths: &[PathBuf]) -> Result<HashSet<String>> {
+    if let Ok(index_path) = repo.get("model.safetensors.index.json") {
+        let v: serde_json::Value = serde_json::from_reader(std::fs::File::open(index_path)?)?;
+        if let Some(map) = v.get("weight_map").and_then(|m| m.as_object()) {
+            return Ok(map.keys().cloned().collect());
+        }
+    }
+    let first = weight_paths.first().context("no weight files")?;
+    safetensors_header_keys(first)
+}
+
+fn safetensors_header_keys(path: &Path) -> Result<HashSet<String>> {
+    let mut f = std::fs::File::open(path)?;
+    let mut len = [0u8; 8];
+    f.read_exact(&mut len)?;
+    let n = u64::from_le_bytes(len) as usize;
+    let mut hdr = vec![0u8; n];
+    f.read_exact(&mut hdr)?;
+    let v: serde_json::Value = serde_json::from_slice(&hdr)?;
+    Ok(v.as_object()
+        .map(|o| {
+            o.keys()
+                .filter(|k| k.as_str() != "__metadata__")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn read_chat_config(repo: &ApiRepo) -> (ChatTemplate, String) {
     let cfg = repo
         .get("tokenizer_config.json")
         .ok()
@@ -121,17 +171,20 @@ fn build_chat_template(repo: &ApiRepo) -> ChatTemplate {
         .and_then(|f| serde_json::from_reader::<_, serde_json::Value>(f).ok());
 
     let Some(cfg) = cfg else {
-        return ChatTemplate::chatml_only();
+        return (ChatTemplate::chatml_only(), String::new());
     };
 
     let template = cfg
         .get("chat_template")
         .and_then(|v| v.as_str())
         .map(String::from);
-    ChatTemplate::new(template, token_str(cfg.get("bos_token")), token_str(cfg.get("eos_token")))
+    let eos = token_str(cfg.get("eos_token"));
+    (
+        ChatTemplate::new(template, token_str(cfg.get("bos_token")), eos.clone()),
+        eos,
+    )
 }
 
-/// HF tokens are either a bare string or `{ "content": "…" }`.
 fn token_str(v: Option<&serde_json::Value>) -> String {
     match v {
         Some(serde_json::Value::String(s)) => s.clone(),

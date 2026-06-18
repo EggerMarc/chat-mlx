@@ -97,9 +97,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (cols, rows) = size()?;
     enable_raw_mode()?;
     let mut out = stdout();
-    // Reserve three bottom rows: a separator, the input field, a separator.
-    // Output scrolls in rows 1..=region_bottom; anchor the output cursor to the
-    // bottom of that region so messages stack upward like a messenger app.
     let region_bottom = rows.saturating_sub(3).max(1);
     let top_sep = rows.saturating_sub(2);
     let sep = "─".repeat(cols as usize);
@@ -113,16 +110,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = String::new();
     let _ = draw_input(&mut out, rows, &buf);
 
-    // Run inside an async block so `?` unwinds to here and the terminal is
-    // always restored.
     let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
         let mut events = EventStream::new();
 
-        // One turn per outer iteration: collect a message, open a stream for it,
-        // drain it, then loop. (A chat-rs `InputStreamed` stream covers a single
-        // turn — interruptible mid-flight — and ends on completion.)
         'session: loop {
-            // Collect the next message (idle: typing starts a new turn).
             let msg = loop {
                 match events.next().await {
                     Some(Ok(Event::Key(k))) => match handle_key(k, &mut buf) {
@@ -140,8 +131,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             print_out(&mut out, rows, &buf, &format!("{CYAN}you> {msg}{RESET}\n"))?;
             msgs.push(content::from_user(parts![msg]));
 
-            // Stream this turn. Typing mid-generation sends a new message, which
-            // interrupts and restarts the turn (chat-rs merges + restarts).
             let (input, mut output) = chat.stream(&mut msgs).await?.split();
             'turn: loop {
                 select! {
@@ -158,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         Some(Ok(_)) => {}
                         Some(Err(e)) =>
                             print_out(&mut out, rows, &buf, &format!("{GRAY}[err] {}{RESET}\n", e.err))?,
-                        None => break 'turn, // turn finished → collect the next message
+                        None => break 'turn,
                     },
                     key = events.next().fuse() => match key {
                         Some(Ok(Event::Key(k))) => match handle_key(k, &mut buf) {
@@ -171,7 +160,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 }
                             }
                             Key::Stop => {
-                                // Interrupt this turn and go back to collecting.
                                 input.cancel();
                                 print_out(&mut out, rows, &buf, &format!("{DIM} [stopped]{RESET}\n"))?;
                                 break 'turn;
@@ -222,10 +210,6 @@ fn handle_key(k: KeyEvent, buf: &mut String) -> Key {
     }
 }
 
-/// Print into the scrolling output area, then redraw the fixed input line. The
-/// output cursor lives in the terminal save slot (`\x1b7`/`\x1b8`) so it resumes
-/// where the last chunk left off, untouched by the input redraw. `\n` in `text`
-/// becomes `\r\n` (raw mode).
 fn print_out(out: &mut Stdout, rows: u16, buf: &str, text: &str) -> std::io::Result<()> {
     write!(out, "\x1b8")?;
     for (i, line) in text.split('\n').enumerate() {
@@ -239,7 +223,6 @@ fn print_out(out: &mut Stdout, rows: u16, buf: &str, text: &str) -> std::io::Res
 }
 
 fn draw_input(out: &mut Stdout, rows: u16, buf: &str) -> std::io::Result<()> {
-    // Input field sits on the row between the two separators.
     write!(out, "\x1b[{};1H\x1b[2K> {buf}", rows.saturating_sub(1))?;
     out.flush()
 }

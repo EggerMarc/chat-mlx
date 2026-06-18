@@ -1,5 +1,3 @@
-// chat-core's `ChatFailure` is large; boxing every Result is not worth it. The
-// other chat-rs providers (e.g. chat-mistralrs) silence this crate-wide too.
 #![allow(clippy::result_large_err)]
 
 pub mod api;

@@ -1,12 +1,3 @@
-//! Incremental JSON-prefix validator and a logit-mask constraint built on it.
-//!
-//! The validator answers, given the output so far, "could feeding this string
-//! keep us on track to a well-formed JSON value?" — used to mask the vocabulary
-//! each decode step so only tokens preserving valid JSON can be sampled. It
-//! enforces JSON *syntax* (the schema's types/required fields are still checked
-//! on the typed deserialize); it is sound (never accepts a token that would make
-//! the output unparseable) but may be slightly conservative.
-
 use std::sync::Arc;
 
 use mlx_rs::{Array, error::Exception};
@@ -35,7 +26,7 @@ fn num_complete(n: Num) -> bool {
 
 enum NumStep {
     Cont(Num),
-    EndReprocess, // number finished; the current char belongs to the enclosing context
+    EndReprocess,
     Invalid,
 }
 
@@ -100,8 +91,6 @@ enum St {
     AfterArr,
 }
 
-/// Incremental JSON validator. `stack` is the container nesting (`true` =
-/// object, `false` = array).
 #[derive(Clone)]
 pub struct JsonState {
     stack: Vec<bool>,
@@ -122,7 +111,6 @@ impl JsonState {
         }
     }
 
-    /// Feed one char; returns false if it cannot extend to valid JSON.
     pub fn feed(&mut self, c: char) -> bool {
         loop {
             match self.st {
@@ -136,14 +124,12 @@ impl JsonState {
                     NumStep::Invalid => return false,
                     NumStep::EndReprocess => {
                         self.complete_value();
-                        continue; // re-process c in the enclosing context
+                        continue;
                     }
                 },
                 _ => {}
             }
 
-            // Whitespace is allowed (and ignored) between structural tokens,
-            // including trailing whitespace after a complete value.
             if is_ws(c) {
                 return true;
             }
@@ -216,14 +202,11 @@ impl JsonState {
                     _ => false,
                 },
                 St::Done => false,
-                // String/Lit/Num handled above.
                 _ => false,
             };
         }
     }
 
-    /// Whether the output so far is a complete top-level JSON value (so EOS is
-    /// allowed).
     pub fn can_terminate(&self) -> bool {
         if !self.stack.is_empty() {
             return false;
@@ -235,7 +218,6 @@ impl JsonState {
         }
     }
 
-    /// Would feeding `s` (from the current state) stay valid? Non-mutating.
     pub fn allows(&self, s: &str) -> bool {
         let mut probe = self.clone();
         s.chars().all(|c| probe.feed(c))
@@ -350,8 +332,6 @@ impl JsonState {
     }
 }
 
-/// A [`LogitMask`] that restricts sampling to tokens keeping the output a valid
-/// JSON prefix, and allows EOS only once a complete value has been produced.
 pub struct JsonConstraint {
     state: JsonState,
     token_strings: Arc<Vec<String>>,
@@ -412,7 +392,9 @@ mod tests {
 
     #[test]
     fn accepts_well_formed() {
-        assert!(accepts(r#"{"name":"Ada","age":36,"tags":["a","b"],"ok":true}"#));
+        assert!(accepts(
+            r#"{"name":"Ada","age":36,"tags":["a","b"],"ok":true}"#
+        ));
         assert!(accepts(r#"[1,2,3]"#));
         assert!(accepts(r#""hello\nthere""#));
         assert!(accepts(r#"-12.5e3"#));
