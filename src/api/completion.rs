@@ -77,7 +77,7 @@ impl CompletionProvider for MlxClient {
                 Some(ts) => {
                     let mut con = JsonConstraint::new(ts, eos.clone());
                     generate::generate_constrained(
-                        &mut model, ids, max_tokens, &sampler, &eos, &mut cache, &mut con, |_| {},
+                        &mut model, ids, max_tokens, &sampler, &eos, &mut cache, &mut con, |_| true,
                     )
                 }
                 None => generate::generate(
@@ -88,7 +88,7 @@ impl CompletionProvider for MlxClient {
                     &eos,
                     tokens_per_eval,
                     &mut cache,
-                    |_| {},
+                    |_| true,
                 ),
             }
             .map_err(|e| ChatError::Provider(format!("generation failed: {e}")))?;

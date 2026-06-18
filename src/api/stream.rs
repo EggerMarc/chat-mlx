@@ -121,6 +121,9 @@ impl StreamProvider for MlxClient {
                             route(chunk, &mut stripper, &tx);
                         }
                     }
+                    // Stop generating if the consumer dropped the stream (e.g.
+                    // a new message restarted the exchange).
+                    !tx.is_closed()
                 },
             );
 
@@ -255,6 +258,7 @@ impl MlxClient {
                         let _ = tx.send(Ok(chunk_event(chunk)));
                     }
                 }
+                !tx.is_closed()
             };
 
             let result = match token_strings {

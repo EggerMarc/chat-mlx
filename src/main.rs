@@ -125,11 +125,12 @@ fn main() -> Result<()> {
         top_p: cli.top_p,
     };
     let mut stream = tokenizer.decode_stream(true);
-    let mut emit = |id: u32| {
+    let mut emit = |id: u32| -> bool {
         if let Ok(Some(s)) = stream.step(id) {
             print!("{s}");
             let _ = std::io::stdout().flush();
         }
+        true
     };
 
     let stats = if cli.ngram {

@@ -20,8 +20,10 @@ pub struct GenStats {
     pub decode_secs: f64,
 }
 
+/// `on_token` returns `false` to stop early (e.g. the streaming consumer was
+/// dropped) — this is how a new message cancels an in-flight generation.
 #[allow(clippy::too_many_arguments)]
-pub fn generate<F: FnMut(u32)>(
+pub fn generate<F: FnMut(u32) -> bool>(
     model: &mut Model,
     prompt_ids: &[u32],
     max_tokens: usize,
@@ -46,8 +48,10 @@ pub fn generate<F: FnMut(u32)>(
     let id0 = y.item::<u32>();
     let mut done = eos.contains(&id0);
     if !done {
-        on_token(id0);
         out.push(id0);
+        if !on_token(id0) {
+            done = true;
+        }
     }
 
     let batch_size = tokens_per_eval.max(1);
@@ -68,9 +72,8 @@ pub fn generate<F: FnMut(u32)>(
                 done = true;
                 break;
             }
-            on_token(id);
             out.push(id);
-            if out.len() >= max_tokens {
+            if !on_token(id) || out.len() >= max_tokens {
                 done = true;
                 break;
             }
@@ -95,7 +98,7 @@ pub fn generate<F: FnMut(u32)>(
 /// Requires a growable cache (`max_size = None`): the verify step is a
 /// multi-token update, which the rotating cache rejects. Greedy only.
 #[allow(clippy::too_many_arguments)]
-pub fn generate_ngram<F: FnMut(u32)>(
+pub fn generate_ngram<F: FnMut(u32) -> bool>(
     model: &mut Model,
     prompt_ids: &[u32],
     max_tokens: usize,
@@ -121,10 +124,9 @@ pub fn generate_ngram<F: FnMut(u32)>(
         if eos.contains(&next_id) {
             break;
         }
-        on_token(next_id);
         out.push(next_id);
         tokens.push(next_id);
-        if out.len() >= max_tokens {
+        if !on_token(next_id) || out.len() >= max_tokens {
             break;
         }
 
@@ -160,10 +162,9 @@ pub fn generate_ngram<F: FnMut(u32)>(
             if eos.contains(&id) {
                 break 'outer;
             }
-            on_token(id);
             out.push(id);
             tokens.push(id);
-            if out.len() >= max_tokens {
+            if !on_token(id) || out.len() >= max_tokens {
                 break 'outer;
             }
         }
@@ -203,7 +204,7 @@ fn ngram_lookup(tokens: &[u32], n: usize, k: usize) -> Vec<u32> {
 /// (constrained decoding). Runs one token per eval — the mask depends on the
 /// realized token, so the batched pipeline can't be used.
 #[allow(clippy::too_many_arguments)]
-pub fn generate_constrained<F: FnMut(u32)>(
+pub fn generate_constrained<F: FnMut(u32) -> bool>(
     model: &mut Model,
     prompt_ids: &[u32],
     max_tokens: usize,
@@ -229,10 +230,9 @@ pub fn generate_constrained<F: FnMut(u32)>(
         if eos.contains(&id) {
             break;
         }
-        on_token(id);
         out.push(id);
         constraint.accept(id);
-        if out.len() >= max_tokens {
+        if !on_token(id) || out.len() >= max_tokens {
             break;
         }
 
