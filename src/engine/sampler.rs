@@ -61,6 +61,6 @@ fn sample_top_p(logits: &Array, p: f32) -> Result<Array> {
     let kept = which(&keep, &sorted, Array::from_f32(0.0))?;
 
     let choice = random::categorical(&kept.log()?, None, None, None)?;
-    let token = take_along_axis(&order, &choice.index((.., NewAxis)), -1)?;
+    let token = take_along_axis(&order, choice.index((.., NewAxis)), -1)?;
     Ok(token.squeeze_axes(&[1])?)
 }

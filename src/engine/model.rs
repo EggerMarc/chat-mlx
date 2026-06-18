@@ -9,8 +9,8 @@ use mlx_rs::{
     quantization::MaybeQuantized,
 };
 
-use crate::cache::KvCache;
-use crate::config::ModelArgs;
+use super::cache::KvCache;
+use super::config::ModelArgs;
 
 #[derive(Debug, Clone, ModuleParameters, Quantizable)]
 pub struct Attention {

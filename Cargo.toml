@@ -3,7 +3,19 @@ name = "chat-mlx"
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.94"
-description = "Standalone MLX inference playground for MiniCPM5 / Llama-family models on Apple Silicon."
+description = "Local-inference chat-rs provider (and CLI) for MiniCPM5 / Llama / Qwen models on Apple Silicon via MLX."
+
+[lib]
+name = "chat_mlx"
+path = "src/lib.rs"
+
+[[bin]]
+name = "chat-mlx"
+path = "src/main.rs"
+
+[[example]]
+name = "chat"
+required-features = ["stream"]
 
 [dependencies]
 # Apple MLX array backend (Metal). Provides Array + ops + nn modules
@@ -15,10 +27,23 @@ mlx-rs = "0.25"
 tokenizers = "0.22"
 hf-hub = "0.4"
 
+# chat-rs provider surface. core is 0.4.2; 0.5.3 is the chat-rs umbrella version.
+chat-core = { path = "../chat-rs/core", version = "0.4.2", features=["stream"] }
+async-trait = "0.1"
+schemars = "1"
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+
+async-stream = { version = "0.3", optional = true }
+futures = { version = "0.3", optional = true }
+
+[features]
+default = ["stream"]
+stream = ["chat-core/stream", "dep:async-stream", "dep:futures"]
 
 [profile.release]
 opt-level = 3

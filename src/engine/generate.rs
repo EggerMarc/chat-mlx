@@ -7,7 +7,7 @@ use mlx_rs::{
     transforms::eval,
 };
 
-use crate::{
+use super::{
     cache::KvCache,
     model::Model,
     sampler::{SampleOpts, sample},
@@ -19,6 +19,7 @@ pub struct GenStats {
     pub decode_secs: f64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn generate<F: FnMut(u32)>(
     model: &mut Model,
     prompt_ids: &[u32],
