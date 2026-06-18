@@ -23,17 +23,12 @@ name = "structured"
 required-features = ["stream"]
 
 [dependencies]
-# Apple MLX array backend (Metal). Provides Array + ops + nn modules
-# (Linear, Rope, RmsNorm, Embedding) + fast kernels (SDPA). We compose
-# the architecture out of these; we do not write the math kernels.
 mlx-rs = "0.25"
 
-# Tokenizer + HF weight/config download (same stack the mlx-rs mistral example uses).
 tokenizers = "0.22"
 hf-hub = "0.4"
 
-# chat-rs provider surface. core is 0.4.2; 0.5.3 is the chat-rs umbrella version.
-chat-core = { path = "../chat-rs/core", version = "0.4.2", features=["stream"] }
+chat-core = { version = "0.4.2", features=["stream"] }
 tools-rs = "0.3"
 async-trait = "0.1"
 schemars = "1"
@@ -49,11 +44,9 @@ futures = { version = "0.3", optional = true }
 minijinja = "2"
 
 [dev-dependencies]
-# Needed by the `#[tool]` / `collect_tools!` macros used in examples/tools.rs.
 tools_core = "0.3"
 tools_macros = "0.3"
 inventory = "0.3"
-# Fixed-input terminal UI for the bidirectional streaming example.
 crossterm = { version = "0.29", features = ["event-stream"] }
 
 [features]

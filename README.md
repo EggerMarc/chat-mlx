@@ -1,6 +1,6 @@
 # chat-mlx
 
-Local-inference **[chat-rs](../chat-rs) provider** (and CLI) for MiniCPM5 /
+Local-inference **[chat-rs](https://github.com/eggermarc/chat-rs) provider** (and CLI) for MiniCPM5 /
 Llama / Qwen-family models on Apple Silicon, via [MLX](https://github.com/ml-explore/mlx).
 It implements `CompletionProvider` + `StreamProvider`, so it drops into
 `chat_core::ChatBuilder` and participates in the tool-calling, structured-output,
@@ -9,12 +9,12 @@ and streaming chat loop — the same surface as `chat-claude`, `chat-openai`, et
 It owns the raw token loop (no daemon, no HTTP): tokenization, chat-templating,
 sampling, KV cache, tool-call parsing, and JSON-constrained decoding all happen
 in-process. The closest sibling is `chat-mistralrs`, but that is a thin wrapper
-over mistral.rs and *rejects* tools/structured output; here we implement the
+over mistral.rs and _rejects_ tools/structured output; here we implement the
 parsing and templating it hides.
 
 `lib + thin bin`: the `chat_mlx` library exposes the provider; the `chat-mlx`
 binary is a small CLI over it. Depends on `chat-core` directly
-(`{ path = "../chat-rs/core", version = "0.4.2" }`).
+(`{ version = "0.4.2", features = ["stream"] }`).
 
 ## Layout
 
@@ -62,7 +62,8 @@ Builder knobs: `with_quantize(bool)`, `with_max_context(i32)`, `with_sink_tokens
 ### Tool calling
 
 Register `tools-rs` tools on the `ChatBuilder` as usual. The provider advertises
-them in the prompt and parses the model's calls back out. Formats are *families*:
+them in the prompt and parses the model's calls back out. Formats are _families_:
+
 - **Hermes/Qwen** (`<tool_call>{…}</tool_call>`) — auto-detected, the default.
 - **Custom pattern** — `MlxBuilder::with_tool_pattern(open, close)`: we strip the
   delimiters and parse the JSON inside.
@@ -75,12 +76,13 @@ surfaces `StreamEvent::ToolCall` / `ToolResult` instead.
 
 `ChatBuilder::with_structured_output::<T>()` (T: `JsonSchema + Deserialize`) works
 two ways, selected by `MlxBuilder::with_structured_mode`:
+
 - **`StructuredMode::Prompt`** (default) — inject the schema into the prompt, parse
   the emitted JSON; the chat loop retries on a parse miss.
 - **`StructuredMode::Constrained`** — mask logits each decode step so only tokens
   keeping the output a valid-JSON prefix can be sampled; EOS only once a complete
   value is formed. Guarantees well-formed JSON (the schema's types/required fields
-  are still validated on the typed deserialize). It enforces JSON *syntax*; full
+  are still validated on the typed deserialize). It enforces JSON _syntax_; full
   schema-level masking would need a grammar engine (llguidance/outlines).
 
 Streaming structured output isn't expressible through chat-core's
@@ -109,6 +111,7 @@ at runtime.
 cargo run --release --example chat        -- --model Qwen/Qwen3-0.6B --temp 0.7 --top-k 40
 cargo run --release --example structured   -- Qwen/Qwen2.5-1.5B-Instruct
 ```
+
 - `chat` — interactive streaming REPL: multi-turn, gray `<think>` reasoning, the
   `get_weather` tool round-trip shown inline.
 - `structured` — streaming structured output in both modes side by side.
@@ -116,6 +119,7 @@ cargo run --release --example structured   -- Qwen/Qwen2.5-1.5B-Instruct
 ## Supported model families
 
 Architecture is config-driven (`config.json`), no per-family source files:
+
 - **Llama / MiniCPM** — GQA, SwiGLU, RoPE; bias per the `attention_bias` flag.
 - **Qwen2 / Qwen2.5** (`model_type == "qwen2"`) — adds **QKV bias** (output
   projection unbiased) and **tied embeddings** (no shipped `lm_head.weight`;
@@ -143,12 +147,12 @@ of forcing a per-token host sync: temperature → `categorical`, top-k via
 
 ## Perf (MiniCPM5-1B, M-series, 256-token decode)
 
-| build / config | decode tok/s |
-| --- | --- |
-| debug | ~8 |
-| release (bf16) | ~28 |
-| release + `--quantize` (4-bit), tpe=8 | ~87 |
-| release + `--quantize` (4-bit), tpe=16 | ~85 |
+| build / config                         | decode tok/s |
+| -------------------------------------- | ------------ |
+| debug                                  | ~8           |
+| release (bf16)                         | ~28          |
+| release + `--quantize` (4-bit), tpe=8  | ~87          |
+| release + `--quantize` (4-bit), tpe=16 | ~85          |
 
 Decode is memory-bandwidth bound on the per-token weight read, so quantization is
 the dominant lever (~3×). `--tokens-per-eval` is now ~flat: with the sampler moved
@@ -187,4 +191,7 @@ MLX quantized layers (best memory, most work). Pragmatic first step: (1) behind 
 - [ ] GGUF loader (study above)
 - [ ] more families (Llama-3, Mistral) + a load matrix
 - [ ] a custom fused Metal kernel experiment
+
+```
+
 ```
